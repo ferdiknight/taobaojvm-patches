@@ -1,0 +1,12 @@
+diff -r 8389681cd7b1 make/openjdk_distro
+--- a/make/openjdk_distro	Tue Nov 15 16:44:09 2011 -0800
++++ b/make/openjdk_distro	Thu Dec 15 21:11:36 2011 +0800
+@@ -27,6 +27,6 @@
+#
+ 
+# Don't put quotes (fail windows build).
+-HOTSPOT_VM_DISTRO=OpenJDK
+-COMPANY_NAME=
++HOTSPOT_VM_DISTRO=OpenJDK (Taobao)
++COMPANY_NAME=Taobao
+ PRODUCT_NAME=OpenJDK

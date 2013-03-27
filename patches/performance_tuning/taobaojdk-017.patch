@@ -1,0 +1,68 @@
+diff -r 79af944c6653 src/share/vm/gc_implementation/parNew/parNewGeneration.cpp
+--- a/src/share/vm/gc_implementation/parNew/parNewGeneration.cpp	Mon Dec 19 21:52:21 2011 +0800
++++ b/src/share/vm/gc_implementation/parNew/parNewGeneration.cpp	Mon Dec 19 22:00:49 2011 +0800
+@@ -526,6 +526,7 @@
+ 
+ void ParEvacuateFollowersClosure::do_void() {
+   ObjToScanQueue* work_q = par_scan_state()->work_queue();
++  uint steal_failures = 0;
+ 
+   while (true) {
+ 
+@@ -550,6 +551,15 @@
+       continue;
+     }
+ 
++    //steal failed
++    steal_failures += 1;
++
++    //if failure times is beyond threshold,gc thread stop stealing
++    if(steal_failures >= StealingFailureThreshold) {
++      terminator()->inc_offered_termination();
++      break;
++    }
++
+     // Otherwise, offer termination.
+     par_scan_state()->start_term_time();
+     if (terminator()->offer_termination()) break;
+diff -r 79af944c6653 src/share/vm/runtime/globals_ext.hpp
+--- a/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 21:52:21 2011 +0800
++++ b/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 22:00:49 2011 +0800
+@@ -34,7 +34,10 @@
+   manageable(bool, PrintGCReason, false,                                    \
+           "Print the reason of triggering a garbage collection cycle")      \
+   product(bool, UseTaobaoPatchJAR, true,                                    \
+-          "Insert Taobao-specific patch JAR into bootclasspath")
++          "Insert Taobao-specific patch JAR into bootclasspath")            \
++  product(uintx, StealingFailureThreshold, 10,                              \
++          "Threshold of unsuccessful stealing, a gc thread will stop"       \
++          "stealing tasks when it has failed this many times")
+ // add new Taobao-specific VM flags here
+ 
+ TAOBAO_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG,
+diff -r 79af944c6653 src/share/vm/utilities/taskqueue.cpp
+--- a/src/share/vm/utilities/taskqueue.cpp	Mon Dec 19 21:52:21 2011 +0800
++++ b/src/share/vm/utilities/taskqueue.cpp	Mon Dec 19 22:00:49 2011 +0800
+@@ -255,6 +255,10 @@
+ }
+ #endif
+ 
++void ParallelTaskTerminator::inc_offered_termination() {
++  Atomic::inc(&_offered_termination);
++}
++
+ void ParallelTaskTerminator::reset_for_reuse() {
+   if (_offered_termination != 0) {
+     assert(_offered_termination == _n_threads,
+diff -r 79af944c6653 src/share/vm/utilities/taskqueue.hpp
+--- a/src/share/vm/utilities/taskqueue.hpp	Mon Dec 19 21:52:21 2011 +0800
++++ b/src/share/vm/utilities/taskqueue.hpp	Mon Dec 19 22:00:49 2011 +0800
+@@ -636,6 +636,8 @@
+   // NULL, then it is ignored.
+   bool offer_termination(TerminatorTerminator* terminator);
+ 
++  void inc_offered_termination();
++
+   // Reset the terminator, so that it may be reused again.
+   // The caller is responsible for ensuring that this is done
+   // in an MT-safe manner, once the previous round of use of

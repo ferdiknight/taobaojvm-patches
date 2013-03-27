@@ -1,0 +1,2273 @@
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/parNew/parNewGeneration.cpp
+--- a/src/share/vm/gc_implementation/parNew/parNewGeneration.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/gc_implementation/parNew/parNewGeneration.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -49,6 +49,7 @@
+ #include "utilities/copy.hpp"
+ #include "utilities/globalDefinitions.hpp"
+ #include "utilities/workgroup.hpp"
++#include "gcih/gcih.inline.hpp"
+ 
+ #ifdef _MSC_VER
+ #pragma warning( push )
+@@ -91,6 +92,45 @@
+   _old_gen_closure.set_generation(old_gen_);
+   _old_gen_root_closure.set_generation(old_gen_);
+ }
++//hongxi start
++ ParScanThreadState::ParScanThreadState(Space* to_space_, ParNewGeneration* gen_,
++ 		     Generation* old_gen_, int thread_num_, ObjToScanQueueSet* work_queue_set_,
++                     Stack<oop>* overflow_stacks_, size_t desired_plab_sz_,
++                     ParallelTaskTerminator& term_, GCIHBitMap* bitmap_,
++		     MemRegion* gcih_, MemRegion* whole_heap_) :
++  _to_space(to_space_), _old_gen(old_gen_), _young_gen(gen_), _thread_num(thread_num_),
++  _work_queue(work_queue_set_->queue(thread_num_)), _to_space_full(false),
++  _overflow_stack(overflow_stacks_ ? overflow_stacks_ + thread_num_ : NULL),
++  _ageTable(false), // false ==> not the global age table, no perf data.
++  _to_space_alloc_buffer(desired_plab_sz_),
++  _to_space_closure(gen_, this), _old_gen_closure(gen_, this),
++  _to_space_root_closure(gen_, this), _old_gen_root_closure(gen_, this),
++  _older_gen_closure(gen_, this),
++  _evacuate_followers(this, &_to_space_closure, &_old_gen_closure,
++                      &_to_space_root_closure, gen_, &_old_gen_root_closure,
++                      work_queue_set_, &term_),
++  _is_alive_closure(gen_), _scan_weak_ref_closure(gen_, this),
++  _keep_alive_closure(&_scan_weak_ref_closure),
++  _promotion_failure_size(0),
++  _strong_roots_time(0.0), _term_time(0.0),
++  _total_size_in_word(0),_total_count(0),
++  _mark_bitmap(bitmap_),_gcih(gcih_),_whole_heap(whole_heap_),
++  _gcih_follow_root_closure(gen_, this),_gcih_do_void_without_do_barrier_closure(gen_, this),
++  _gcih_do_void_with_do_barrier_closure(gen_,this) {
++  #if TASKQUEUE_STATS
++  _term_attempts = 0;
++  _overflow_refills = 0;
++  _overflow_refill_objs = 0;
++  #endif // TASKQUEUE_STATS
++
++  _survivor_chunk_array =
++    (ChunkArray*) old_gen()->get_data_recorder(thread_num());
++  _hash_seed = 17;  // Might want to take time-based random value.
++  _start = os::elapsedTime();
++  _old_gen_closure.set_generation(old_gen_);
++  _old_gen_root_closure.set_generation(old_gen_);
++}
++//hongxi end
+ #ifdef _MSC_VER
+ #pragma warning( pop )
+ #endif
+@@ -110,6 +150,46 @@
+          new_obj != old_obj;
+ }
+ 
++//hongxi start
++void ParScanThreadState::gcih_scan_partial_array_and_push_remainder(oop old) {
++  assert(old->is_objArray(), "must be obj array");
++  assert(old->is_forwarded(), "must be forwarded");
++  assert(Universe::heap()->is_in_reserved(old), "must be in heap.");
++  assert(!old_gen()->is_in(old), "must be in young generation.");
++
++  objArrayOop obj = objArrayOop(old->forwardee());
++  // Process ParGCArrayScanChunk elements now
++  // and push the remainder back onto queue
++  int start     = arrayOop(old)->length();
++  int end       = obj->length();
++  int remainder = end - start;
++  assert(start <= end, "just checking");
++  if (remainder > 2 * ParGCArrayScanChunk) {
++    // Test above combines last partial chunk with a full chunk
++    end = start + ParGCArrayScanChunk;
++    arrayOop(old)->set_length(end);
++    // Push remainder.
++    bool ok = work_queue()->push(old);
++    assert(ok, "just popped, push must be okay");
++  } else {
++    // Restore length so that it can be used if there
++    // is a promotion failure and forwarding pointers
++    // must be removed.
++    arrayOop(old)->set_length(end);
++  }
++
++  // process our set of indices (include header in first chunk)
++  // should make sure end is even (aligned to HeapWord in case of compressed oops)
++  if ((HeapWord *)obj < young_old_boundary()) {
++    // object is in to_space
++    obj->oop_iterate_range(&gcih_do_void_without_do_barrier_closure(), start, end);
++  } else {
++    // object is in old generation
++    obj->oop_iterate_range(&gcih_do_void_with_do_barrier_closure(), start, end);
++  }
++}
++//hongxi end
++
+ void ParScanThreadState::scan_partial_array_and_push_remainder(oop old) {
+   assert(old->is_objArray(), "must be obj array");
+   assert(old->is_forwarded(), "must be forwarded");
+@@ -148,6 +228,41 @@
+   }
+ }
+ 
++//hongxi start
++void ParScanThreadState::gcih_trim_queues(int max_size) {
++  ObjToScanQueue* queue = work_queue();
++  do {
++    while (queue->size() > (juint)max_size) {
++      oop obj_to_scan;
++      if (queue->pop_local(obj_to_scan)) {
++        if ((HeapWord *)obj_to_scan < young_old_boundary()) {
++	  //hongxi should we comment this or not???????
++	  /*
++          if (obj_to_scan->is_objArray() &&
++              obj_to_scan->is_forwarded() &&
++              obj_to_scan->forwardee() != obj_to_scan) {
++            gcih_scan_partial_array_and_push_remainder(obj_to_scan);
++          } else {
++	  */
++            // object is in to_space
++          obj_to_scan->oop_iterate(&gcih_do_void_without_do_barrier_closure());
++          //}
++        } else {
++          // object is in old generation
++            obj_to_scan->oop_iterate(&gcih_do_void_with_do_barrier_closure());
++        }
++      }
++    }
++    // For the  case of compressed oops, we have a private, non-shared
++    // overflow stack, so we eagerly drain it so as to more evenly
++    // distribute load early. Note: this may be good to do in
++    // general rather than delay for the final stealing phase.
++    // If applicable, we'll transfer a set of objects over to our
++    // work queue, allowing them to be stolen and draining our
++    // private overflow stack.
++  } while (ParGCTrimOverflow && young_gen()->take_from_overflow_list(this));
++}
++//hongxi end
+ 
+ void ParScanThreadState::trim_queues(int max_size) {
+   ObjToScanQueue* queue = work_queue();
+@@ -300,12 +415,22 @@
+                         Stack<oop>*             overflow_stacks_,
+                         size_t                  desired_plab_sz,
+                         ParallelTaskTerminator& term);
++  ParScanThreadStateSet(int                     num_threads,
++                        Space&                  to_space,
++                        ParNewGeneration&       gen,
++                        Generation&             old_gen,
++                        ObjToScanQueueSet&      queue_set,
++                        Stack<oop>*             overflow_stacks_,
++                        size_t                  desired_plab_sz,
++                        ParallelTaskTerminator& term,
++			bool ctor_for_gcih);
+ 
+   ~ParScanThreadStateSet() { TASKQUEUE_STATS_ONLY(reset_stats()); }
+ 
+   inline ParScanThreadState& thread_state(int i);
+ 
+   void reset(bool promotion_failed);
++  void print_total_word_size();
+   void flush();
+ 
+   #if TASKQUEUE_STATS
+@@ -322,8 +447,36 @@
+   ParallelTaskTerminator& _term;
+   ParNewGeneration&       _gen;
+   Generation&             _next_gen;
++  //hongxi start
++  GCIHBitMap     _mark_bitmap;
++  MemRegion _gcih;
++  MemRegion _whole_heap;
++  //hongxi end
+ };
+ 
++//hongxi start
++ParScanThreadStateSet::ParScanThreadStateSet(int num_threads, Space& to_space, ParNewGeneration& gen,
++  			Generation& old_gen, ObjToScanQueueSet& queue_set,
++                        Stack<oop>* overflow_stacks, size_t desired_plab_sz,
++                        ParallelTaskTerminator& term, bool ctor_for_gcih):
++    ResourceArray(sizeof(ParScanThreadState), num_threads),
++    _gen(gen), _next_gen(old_gen), _term(term),
++	_mark_bitmap(0, Mutex::leaf + 1, "GCIH_markBitMap_lock"),
++	_gcih(GCInvisibleHeap::reserved()),
++	_whole_heap(GenCollectedHeap::heap()->reserved_region()){
++  assert(num_threads > 0, "sanity check!");
++  assert(ParGCUseLocalOverflow == (overflow_stacks != NULL),
++         "overflow_stack allocation mismatch");
++  //allocate space for bitMap
++  _mark_bitmap.allocate(_whole_heap);
++  // Initialize states.
++  for (int i = 0; i < num_threads; ++i) {
++    new ((ParScanThreadState*)_data + i)
++        ParScanThreadState(&to_space, &gen, &old_gen, i, &queue_set,
++                           overflow_stacks, desired_plab_sz, term, &_mark_bitmap, &_gcih, &_whole_heap);
++  }
++}
++//hongxi end
+ 
+ ParScanThreadStateSet::ParScanThreadStateSet(
+   int num_threads, Space& to_space, ParNewGeneration& gen,
+@@ -350,6 +503,21 @@
+   return ((ParScanThreadState*)_data)[i];
+ }
+ 
++//hongxi start
++//output gcih moveout details
++void ParScanThreadStateSet::print_total_word_size() {
++  int total_byte_size = 0;
++  int total_count = 0;
++  gclog_or_tty->print("\n");
++  for (int i = 0; i < length(); ++i) {
++    total_byte_size += thread_state(i).total_word_size();
++    total_count += thread_state(i).total_count();
++    gclog_or_tty->print_cr("%d----total_count == %d---total_word_size == %d word", i, thread_state(i).total_count(), thread_state(i).total_word_size());
++  }
++  total_byte_size *= HeapWordSize;
++  gclog_or_tty->print_cr("total byte size moved == %d byte", total_byte_size);
++}
++//hongxi end
+ 
+ void ParScanThreadStateSet::reset(bool promotion_failed)
+ {
+@@ -471,6 +639,14 @@
+     CFLS_LAB::compute_desired_plab_size();
+   }
+ }
++//hongxi start
++GCIH_AdjustOopAddressClosure::GCIH_AdjustOopAddressClosure(
++	ParNewGeneration* par_new_gen_, ParScanThreadState* par_scan_state_):
++	OopsInGenClosure(par_new_gen_),
++	_par_scan_state(par_scan_state_),
++	_null_gcih_oopclosure(),
++	_young_old_boundary((par_new_gen_)->reserved().end()){}
++//hongxi end
+ 
+ ParScanClosure::ParScanClosure(ParNewGeneration* g,
+                                ParScanThreadState* par_scan_state) :
+@@ -480,6 +656,14 @@
+   _boundary = _g->reserved().end();
+ }
+ 
++//hongxi start
++void GCIH_ParFollowRootClosure::do_oop(oop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, true, false); }
++void GCIH_ParFollowRootClosure::do_oop(narrowOop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, true, false); }
++void GCIH_ParDoVoidWithoutDoBarrierClosure::do_oop(oop* p)       { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, false); }
++void GCIH_ParDoVoidWithoutDoBarrierClosure::do_oop(narrowOop* p)       { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, false); }
++void GCIH_ParDoVoidWithDoBarrierClosure::do_oop(oop* p)       { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, true); }
++void GCIH_ParDoVoidWithDoBarrierClosure::do_oop(narrowOop* p)       { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, true); }
++//hongxi end
+ void ParScanWithBarrierClosure::do_oop(oop* p)       { ParScanClosure::do_oop_work(p, true, false); }
+ void ParScanWithBarrierClosure::do_oop(narrowOop* p) { ParScanClosure::do_oop_work(p, true, false); }
+ 
+@@ -524,6 +708,16 @@
+     _terminator(terminator_)
+ {}
+ 
++//hongxi start
++void NullGCIHOopClosure::do_oop(oop* p) {
++  do_oop_work(p);
++}
++
++void NullGCIHOopClosure::do_oop(narrowOop* p) {
++  do_oop_work(p);
++}
++//hongxi end
++
+ void ParEvacuateFollowersClosure::do_void() {
+   ObjToScanQueue* work_q = par_scan_state()->work_queue();
+ 
+@@ -561,6 +755,84 @@
+   par_scan_state()->end_term_time();
+ }
+ 
++//hongxi start
++void ParEvacuateFollowersClosure::gcih_do_void() {
++  ObjToScanQueue* work_q = par_scan_state()->work_queue();
++  uint steal_failures = 0;
++
++  while (true) {
++
++    // Scan to-space and old-gen objs until we run out of both.
++    oop obj_to_scan;
++    par_scan_state()->gcih_trim_queues(0);
++
++    // We have no local work, attempt to steal from other threads.
++
++    // attempt to steal work from promoted.
++    if (task_queues()->steal(par_scan_state()->thread_num(),
++                             par_scan_state()->hash_seed(),
++                             obj_to_scan)) {
++      bool res = work_q->push(obj_to_scan);
++      assert(res, "Empty queue should have room for a push.");
++
++      //   if successful, goto Start.
++      continue;
++
++      // try global overflow list.
++    } else if (par_gen()->take_from_overflow_list(par_scan_state())) {
++      continue;
++    }
++
++    //steal failed
++    ++steal_failures;
++
++    //if failure times is beyond threshold,gc thread stop stealing
++    if(steal_failures >= StealingFailureThreshold) {
++      terminator()->inc_offered_termination();
++      break;
++    }
++
++    // Otherwise, offer termination.
++    par_scan_state()->start_term_time();
++    if (terminator()->offer_termination()) break;
++    par_scan_state()->end_term_time();
++  }
++  assert(par_gen()->_overflow_list == NULL && par_gen()->_num_par_pushes == 0,
++         "Broken overflow list?");
++  // Finish the last termination pause.
++  par_scan_state()->end_term_time();
++}
++
++void GCIHTask::work(int i) {
++  GenCollectedHeap* gch = GenCollectedHeap::heap();
++  // Since this is being done in a separate thread, need new resource
++  // and handle marks.
++  ResourceMark rm;
++  HandleMark hm;
++  // We would need multiple old-gen queues otherwise.
++  assert(gch->n_gens() == 2, "Par young collection currently only works with one older gen.");
++
++  ParScanThreadState& par_scan_state = _state_set->thread_state(i);
++  par_scan_state.set_young_old_boundary(_young_old_boundary);
++
++  par_scan_state.start_strong_roots();
++  int _cms_level = 1;
++  gch->gen_process_strong_roots(_cms_level,
++                                false,  // Process younger gens, if any,
++                                       // as strong roots.
++                                false, // no scope; this is parallel code
++                                true, // not collecting perm generation.
++                                SharedHeap::SO_AllClasses,
++                                &par_scan_state.gcih_follow_root_closure(),
++                                true,   // walk *all* scavengable nmethods
++                                &par_scan_state.gcih_follow_root_closure());
++  par_scan_state.end_strong_roots();
++
++  // "evacuate followers".
++  par_scan_state.evacuate_followers_closure().gcih_do_void();
++}
++//hongxi end
++
+ ParNewGenTask::ParNewGenTask(ParNewGeneration* gen, Generation* next_gen,
+                 HeapWord* young_old_boundary, ParScanThreadStateSet* state_set) :
+     AbstractGangTask("ParNewGeneration collection"),
+@@ -704,6 +976,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //hongxi start
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //hongxi end
+     if ((HeapWord*)obj < _boundary) {
+       assert(!_g->to()->is_in_reserved(obj), "Scanning field twice?");
+       oop new_obj = obj->is_forwarded()
+@@ -845,6 +1122,45 @@
+     age_table()->compute_tenuring_threshold(to()->capacity()/HeapWordSize);
+ }
+ 
++//hongxi start
++void ParNewGeneration::gcih_adjust_oop_address() {
++  GenCollectedHeap* gch = GenCollectedHeap::heap();
++  //to see if younggen has enough space for live oop in gcih
++  //if free() is lower than half of capacity(),then ygc first
++  if (this->free() <  100 * M) {
++    gclog_or_tty->print_cr("\nParNewGen(1)--free == %d M bytes---capacity == %d M bytes",this->free()/M,this->capacity()/M);
++    gch->do_collection(false, false, 3, false, 1);
++    gclog_or_tty->print_cr("ParNewGen(2)--free == %d M bytes---capacity == %d M bytes",this->free()/M,this->capacity()/M);
++  }
++	
++  _next_gen = gch->next_gen(this);
++  WorkGang* workers = gch->workers();
++  ParallelTaskTerminator _term(workers->total_workers(), task_queues());
++  ParScanThreadStateSet thread_state_set(workers->total_workers(),
++      *to(), *this, *_next_gen, *task_queues(),_overflow_stacks,
++      desired_plab_sz(), _term, true);
++  GCIHTask tsk(this, _next_gen, reserved().end(), &thread_state_set);
++  int n_workers = workers->total_workers();
++  gch->set_par_threads(n_workers);
++  // It turns out that even when we're using 1 thread, doing the work in a
++  // separate thread causes wide variance in run times.  We can't help this
++  // in the multi-threaded case, but we special-case n=1 here to get
++  // repeatable measurements of the 1-thread overhead of the parallel code.
++  if (n_workers > 1) {
++    GenCollectedHeap::StrongRootsScope srs(gch);
++    workers->run_task(&tsk);
++  }else {
++      GenCollectedHeap::StrongRootsScope srs(gch);
++      tsk.work(0);
++  }
++
++  thread_state_set.reset(false);
++  thread_state_set.print_total_word_size();
++  //thread_state_set.flush();
++  gch->set_par_threads(0);
++}
++//hongxi end
++
+ // A Generation that does parallel young-gen collection.
+ 
+ void ParNewGeneration::collect(bool   full,
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/parNew/parNewGeneration.hpp
+--- a/src/share/vm/gc_implementation/parNew/parNewGeneration.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/gc_implementation/parNew/parNewGeneration.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -28,6 +28,7 @@
+ #include "gc_implementation/parNew/parGCAllocBuffer.hpp"
+ #include "memory/defNewGeneration.hpp"
+ #include "utilities/taskqueue.hpp"
++#include "gc_implementation/shared/GCIHBitMap.hpp"
+ 
+ class ChunkArray;
+ class ParScanWithoutBarrierClosure;
+@@ -113,6 +114,17 @@
+   double _strong_roots_time;
+   double _start_term;
+   double _term_time;
++  
++  //hongxi start
++  GCIHBitMap*     _mark_bitmap;
++  MemRegion* _gcih;
++  MemRegion* _whole_heap;
++  GCIH_ParFollowRootClosure _gcih_follow_root_closure;
++  GCIH_ParDoVoidWithoutDoBarrierClosure _gcih_do_void_without_do_barrier_closure;
++  GCIH_ParDoVoidWithDoBarrierClosure _gcih_do_void_with_do_barrier_closure;
++  int _total_size_in_word;
++  int _total_count;
++  //hongxi end
+ 
+   // Helper for trim_queues. Scans subset of an array and makes
+   // remainder available for work stealing.
+@@ -130,7 +142,15 @@
+                      Stack<oop>* overflow_stacks_,
+                      size_t desired_plab_sz_,
+                      ParallelTaskTerminator& term_);
+-
++  ParScanThreadState(Space* to_space_, ParNewGeneration* gen_,
++                     Generation* old_gen_, int thread_num_,
++                     ObjToScanQueueSet* work_queue_set_,
++                     Stack<oop>* overflow_stacks_,
++                     size_t desired_plab_sz_,
++                     ParallelTaskTerminator& term_,
++		     GCIHBitMap* bitmap_,
++		     MemRegion* gcih_,
++		     MemRegion* whole_heap_);
+  public:
+   ageTable* age_table() {return &_ageTable;}
+ 
+@@ -147,6 +167,21 @@
+   ParScanClosure&                   older_gen_closure() { return _older_gen_closure; }
+   ParRootScanWithoutBarrierClosure& to_space_root_closure() { return _to_space_root_closure; };
+ 
++  //hongxi start
++  void add_total_word_size(int size) { _total_size_in_word += size;}
++  int total_word_size() { return _total_size_in_word;}
++  void add_total_count() { ++_total_count;}
++  int total_count() {return _total_count;}
++  GCIHBitMap* gcih_bit_map() {return _mark_bitmap;}
++  MemRegion* gcih() {return _gcih;}
++  MemRegion* whole_heap() {return _whole_heap;}
++  void gcih_trim_queues(int max_size);
++  void gcih_scan_partial_array_and_push_remainder(oop obj);
++  GCIH_ParFollowRootClosure& gcih_follow_root_closure() { return _gcih_follow_root_closure;}
++  GCIH_ParDoVoidWithoutDoBarrierClosure& gcih_do_void_without_do_barrier_closure() { return _gcih_do_void_without_do_barrier_closure;}
++  GCIH_ParDoVoidWithDoBarrierClosure& gcih_do_void_with_do_barrier_closure() {return _gcih_do_void_with_do_barrier_closure;}
++  //hongxi end
++
+   // Decrease queue size below "max_size".
+   void trim_queues(int max_size);
+ 
+@@ -242,6 +277,27 @@
+   void work(int i);
+ };
+ 
++//hongxi start
++class GCIHTask : public AbstractGangTask {
++  private:
++    ParNewGeneration*            _gen;   
++    Generation*                  _next_gen;
++    HeapWord*                    _young_old_boundary;
++    class ParScanThreadStateSet* _state_set;		   
++  public:
++    GCIHTask(ParNewGeneration*      gen,
++    Generation*            next_gen,
++    HeapWord*              young_old_boundary,
++    ParScanThreadStateSet* state_set) :
++    AbstractGangTask("GCIH AdjustOopAddress"),
++    _gen(gen), _next_gen(next_gen),
++    _young_old_boundary( young_old_boundary), _state_set(state_set){}
++    HeapWord* young_old_boundary() { return _young_old_boundary;}
++
++    void work(int i);
++};
++//hongxi end
++
+ class KeepAliveClosure: public DefNewGeneration::KeepAliveClosure {
+  protected:
+   template <class T> void do_oop_work(T* p);
+@@ -369,6 +425,9 @@
+     assert(UseParNewGC, "ParNewGeneration only when UseParNewGC");
+     return ParallelGCThreads > 1;
+   }
++  //hongxi start
++  void check_oop();
++  //hongxi end
+ 
+   // Make the collection virtual.
+   virtual void collect(bool   full,
+@@ -428,6 +487,10 @@
+   static oop real_forwardee(oop obj);
+ 
+   DEBUG_ONLY(static bool is_legal_forward_ptr(oop p);)
++  
++  //hongxi start
++  void gcih_adjust_oop_address();
++  //hongxi end
+ };
+ 
+ #endif // SHARE_VM_GC_IMPLEMENTATION_PARNEW_PARNEWGENERATION_HPP
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/parNew/parOopClosures.hpp
+--- a/src/share/vm/gc_implementation/parNew/parOopClosures.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/gc_implementation/parNew/parOopClosures.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -35,6 +35,69 @@
+ typedef GenericTaskQueueSet<ObjToScanQueue> ObjToScanQueueSet;
+ class ParallelTaskTerminator;
+ 
++//hongxi start
++class NullGCIHOopClosure: public OopClosure {
++public:
++  NullGCIHOopClosure(){}
++  template <class T> void inline do_oop_work(T* p);
++  virtual void do_oop(oop* p);
++  virtual void do_oop(narrowOop* p);
++  inline  void do_oop_nv(oop* p);
++  inline  void do_oop_nv(narrowOop* p);
++};
++
++class GCIH_AdjustOopAddressClosure : public OopsInGenClosure {
++  public:
++   GCIH_AdjustOopAddressClosure(ParNewGeneration* par_new_gen_,
++   				ParScanThreadState* par_scan_state_);
++   GCIH_AdjustOopAddressClosure() : _null_gcih_oopclosure(){
++	_par_scan_state = 0;
++	_young_old_boundary = 0;
++   }
++   template <class T> void inline do_oop_work(T *p, bool root_scan, bool do_barrier);
++   oop move_and_mark_object(oop obj, bool& succeed);
++   void undo_alloc_in_eden(HeapWord* obj, size_t word_sz);
++   template <class T> void inline par_do_barrier(T* p);
++   HeapWord* gen_boundary(){
++	   return _young_old_boundary;
++   }
++  protected:
++   class ParScanThreadState* _par_scan_state;
++   HeapWord* _young_old_boundary;
++   NullGCIHOopClosure _null_gcih_oopclosure;
++};
++class GCIH_ParFollowRootClosure : public  GCIH_AdjustOopAddressClosure {
++  public:
++   GCIH_ParFollowRootClosure(ParNewGeneration* par_new_gen_,
++   		             ParScanThreadState* par_scan_state_):
++   GCIH_AdjustOopAddressClosure(par_new_gen_, par_scan_state_){}
++   GCIH_ParFollowRootClosure(){}
++   virtual void do_oop(oop* p);
++   virtual void do_oop(narrowOop* p);
++   inline void do_oop_nv(oop* p);
++   inline void do_oop_nv(narrowOop* p);
++};
++class GCIH_ParDoVoidWithoutDoBarrierClosure : public  GCIH_AdjustOopAddressClosure {
++  public: 
++   GCIH_ParDoVoidWithoutDoBarrierClosure(ParNewGeneration* par_new_gen_,
++   			 ParScanThreadState* par_scan_state_): GCIH_AdjustOopAddressClosure(par_new_gen_, par_scan_state_){}
++   GCIH_ParDoVoidWithoutDoBarrierClosure(){}
++   virtual void do_oop(oop* p);
++   virtual void do_oop(narrowOop* p);
++   inline void do_oop_nv(oop* p);
++   inline void do_oop_nv(narrowOop* p);
++};
++class GCIH_ParDoVoidWithDoBarrierClosure : public  GCIH_AdjustOopAddressClosure {
++  public: 
++   GCIH_ParDoVoidWithDoBarrierClosure(ParNewGeneration* par_new_gen_,
++   			 ParScanThreadState* par_scan_state_): GCIH_AdjustOopAddressClosure(par_new_gen_, par_scan_state_){}
++   GCIH_ParDoVoidWithDoBarrierClosure(){}
++   virtual void do_oop(oop* p);
++   virtual void do_oop(narrowOop* p);
++   inline void do_oop_nv(oop* p);
++   inline void do_oop_nv(narrowOop* p);
++};
++//hongxi end
+ class ParScanClosure: public OopsInGenClosure {
+  protected:
+   ParScanThreadState* _par_scan_state;
+@@ -145,6 +208,7 @@
+     ObjToScanQueueSet* task_queues_,
+     ParallelTaskTerminator* terminator_);
+   virtual void do_void();
++  void gcih_do_void();
+ };
+ 
+ #endif // SHARE_VM_GC_IMPLEMENTATION_PARNEW_PAROOPCLOSURES_HPP
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/parNew/parOopClosures.inline.hpp
+--- a/src/share/vm/gc_implementation/parNew/parOopClosures.inline.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/gc_implementation/parNew/parOopClosures.inline.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -29,6 +29,128 @@
+ #include "gc_implementation/parNew/parOopClosures.hpp"
+ #include "memory/cardTableRS.hpp"
+ 
++//hongxi start
++#include "gcih/gcih.inline.hpp"
++#include "oops/markOop.hpp"
++
++void NullGCIHOopClosure::do_oop_nv(oop* p) {
++  NullGCIHOopClosure::do_oop_work(p);
++}
++
++void NullGCIHOopClosure::do_oop_nv(narrowOop* p) {
++  NullGCIHOopClosure::do_oop_work(p);
++}
++
++template<class T>
++inline void NullGCIHOopClosure::do_oop_work(T* p) {
++  assert (!oopDesc::is_null(*p), "null oop");
++  oop obj = oopDesc::load_decode_heap_oop_not_null(p);
++  if (!oopDesc::is_null(obj)) {
++    if(!obj->is_klass())
++      oopDesc::encode_store_heap_oop_not_null(p, NULL);
++  }
++}
++
++template<class T>
++void inline GCIH_AdjustOopAddressClosure::do_oop_work(T* p, bool root_scan, bool do_barrier) {
++  T heap_oop = oopDesc::load_heap_oop(p);
++  if (!oopDesc::is_null(heap_oop)) {
++    oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    oop new_object = NULL;
++    HeapWord* addr = (HeapWord*)obj;
++
++    if (_par_scan_state->whole_heap()->contains(addr)) {
++      if (!_par_scan_state->gcih_bit_map()->par_isMarked(addr)) {
++	bool res = _par_scan_state->gcih_bit_map()->par_mark(addr);
++	  if(res) {
++	    _par_scan_state->work_queue()->push(obj);//if failed ?
++	  }//else addr is marked by other thread, we should not push it to our stack
++        }
++    }else {
++      ResourceMark rm;
++      if(_par_scan_state->gcih()->contains(addr)) {
++	if (obj->is_forwarded()) {
++	  new_object = ParNewGeneration::real_forwardee(obj);
++	  if(PrintMoveOutOopInfo) {
++	  gclog_or_tty->print_cr("forward---obj == 0x%llx--obj.mark == %llx--new_object == 0x%llx---obj.name == %s", \
++	                 obj, obj->mark(), new_object, obj->blueprint()->external_name());
++	  }
++	}else {
++	  bool succeed = true;
++	  new_object = move_and_mark_object(obj, succeed);
++	  //if allocate space failed, only encode_store NULL to p,no push to mark and no oop_iterate!!!
++	  if(new_object != NULL && succeed) {
++	    if(PrintMoveOutOopInfo) {
++	      gclog_or_tty->print_cr("new_moveout : obj == 0x%llx--obj.mark == %llx------obj.name == %s", obj, obj->mark(), obj->blueprint()->external_name());
++	    }
++	    //_par_scan_state->work_queue()->push(new_object);//if failed ?
++	    // here we are sure new_object is a object copy form gcih, so set all its reference to null, and don't push it to queue
++	    new_object->oop_iterate(&_null_gcih_oopclosure);
++	    _par_scan_state->add_total_word_size(obj->size());
++	    _par_scan_state->add_total_count();
++	  }
++	}
++
++        oopDesc::encode_store_heap_oop_not_null(p, new_object);
++      }else {
++	gclog_or_tty->print_cr("not in gcih-------not in javaheap");
++      }
++    }
++
++    if(root_scan) {
++      _par_scan_state->gcih_trim_queues(0);
++    }
++    if(do_barrier) {
++      par_do_barrier(p);
++    }
++  }
++}
++oop inline GCIH_AdjustOopAddressClosure::move_and_mark_object(oop obj, bool& succeed) {
++  GenCollectedHeap* gch = GenCollectedHeap::heap();
++  size_t sz = obj->size();
++  int young_level = 0, cms_gen_level = 1;
++  markOop m = obj->mark();
++  //char* from_flag = "young";
++  oop new_obj = (oop)gch->get_gen(young_level)->allocate(sz, true);
++  if(new_obj == NULL) {
++     new_obj = (oop)gch->get_gen(cms_gen_level)->allocate(sz, false);
++     //from_flag = "old";
++  }
++  if(new_obj != NULL) {
++     Copy::aligned_disjoint_words((HeapWord*)obj, (HeapWord*)new_obj, sz);
++     new_obj->set_mark(m);
++     oop forward_ptr = obj->forward_to_atomic(new_obj);
++     if( forward_ptr != NULL){
++       undo_alloc_in_eden((HeapWord*)new_obj, sz);
++       new_obj = forward_ptr;
++       succeed = false;
++     }
++  }
++
++  return new_obj;
++}
++template <class T> inline void GCIH_AdjustOopAddressClosure::par_do_barrier(T* p) {
++  assert(!oopDesc::is_null(*p), "expected non-null object");
++  oop obj = oopDesc::load_decode_heap_oop_not_null(p);
++  // If p points to a younger generation, mark the card.
++  if ((HeapWord*)obj < gen_boundary()) {
++    rs()->write_ref_field_gc_par(p, obj);
++  }
++}
++void inline GCIH_AdjustOopAddressClosure::undo_alloc_in_eden(HeapWord* obj, size_t word_sz){
++	CollectedHeap::fill_with_object(obj, word_sz);
++}
++
++inline void GCIH_ParFollowRootClosure::do_oop_nv(oop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, true, false); }
++inline void GCIH_ParFollowRootClosure::do_oop_nv(narrowOop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, true, false); }
++inline void GCIH_ParDoVoidWithoutDoBarrierClosure::do_oop_nv(oop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, false); }
++inline void GCIH_ParDoVoidWithoutDoBarrierClosure::do_oop_nv(narrowOop* p) {
++  GCIH_AdjustOopAddressClosure::do_oop_work(p, false, false);
++}
++inline void GCIH_ParDoVoidWithDoBarrierClosure::do_oop_nv(oop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, true); }
++inline void GCIH_ParDoVoidWithDoBarrierClosure::do_oop_nv(narrowOop* p) { GCIH_AdjustOopAddressClosure::do_oop_work(p, false, true);}
++//hongxi end
++
+ template <class T> inline void ParScanWeakRefClosure::do_oop_work(T* p) {
+   assert (!oopDesc::is_null(*p), "null weak reference?");
+   oop obj = oopDesc::load_decode_heap_oop_not_null(p);
+@@ -76,6 +198,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH in ParScanClosure closure">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if ((HeapWord*)obj < _boundary) {
+       assert(!_g->to()->is_in_reserved(obj), "Scanning field twice?");
+       // OK, we need to ensure that it is copied.
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/shared/GCIHBitMap.cpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gc_implementation/shared/GCIHBitMap.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,49 @@
++// GCIH Bit Map Wrapper /////////////////////////////////////////
++
++// Construct a GCIH bit map infrastructure, but don't create the
++// bit vector itself. That is done by a separate call GCIHBitMap::allocate()
++// further below.
++#include "GCIHBitMap.hpp"
++#include "utilities/bitMap.inline.hpp"
++
++GCIHBitMap::GCIHBitMap(int shifter, int mutex_rank, const char* mutex_name):
++	_bm(),
++	_shifter(shifter),
++	_lock(mutex_rank >= 0 ? new Mutex(mutex_rank, mutex_name, true) : NULL)
++{
++	_bmStartWord = 0;
++	_bmWordSize  = 0;
++}
++GCIHBitMap::GCIHBitMap():_bm(), _shifter(0), _lock(NULL) {
++	_bmStartWord = 0;
++	_bmWordSize  = 0;	
++}
++bool GCIHBitMap::allocate(MemRegion mr)
++{
++	_bmStartWord = mr.start();
++        _bmWordSize  = mr.word_size();
++	ReservedSpace brs(ReservedSpace::allocation_align_size_up(
++	(_bmWordSize >> (_shifter + LogBitsPerByte)) + 1));
++	if (!brs.is_reserved())
++	{
++		warning("GCIH bit map allocation failure");
++		return false;
++	}
++	// For now we'll just commit all of the bit map up fromt.
++	// Later on we'll try to be more parsimonious with swap.
++	//printf("allcoate---%d  bytes", brs.size());
++	if (!_virtual_space.initialize(brs, brs.size()))
++	{
++		warning("GCIH bit map backing store failure");
++		return false;
++	}
++	assert(_virtual_space.committed_size() == brs.size(),
++	"didn't reserve backing store for all of GCIH bit map?");
++	_bm.set_map((BitMap::bm_word_t*)_virtual_space.low());
++	assert(_virtual_space.committed_size() << (_shifter + LogBitsPerByte) >=_bmWordSize, "inconsistency in bit map sizing");
++	_bm.set_size(_bmWordSize >> _shifter);
++	// bm.clear(); // can we rely on getting zero'd memory? verify below
++	assert(isAllClear(),"Expected zero'd memory from ReservedSpace constructor");
++	assert(_bm.size() == heapWordDiffToOffsetDiff(sizeInWords()), "consistency check");
++	return true;
++}
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/shared/GCIHBitMap.hpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gc_implementation/shared/GCIHBitMap.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,87 @@
++#include "runtime/virtualspace.hpp"
++#include "utilities/bitMap.hpp"
++#include "runtime/mutex.hpp"
++
++class GCIHBitMap VALUE_OBJ_CLASS_SPEC {
++	HeapWord* _bmStartWord;   // base address of range covered by map
++	size_t    _bmWordSize;    // map size (in #HeapWords covered)
++	const int _shifter;       // shifts to convert HeapWord to bit position
++	VirtualSpace _virtual_space; // underlying the bit map
++	BitMap    _bm;            // the bit map itself
++public:
++	Mutex* const _lock;       // mutex protecting _bm;
++	GCIHBitMap(int shifter, int mutex_rank, const char* mutex_name);
++	//default ctor used for origin ParScanThreadStateSet::ParScanThreadStateSet()
++	GCIHBitMap();
++	~GCIHBitMap(){
++		//printf("release---%d  byte", _virtual_space.high_boundary()-_virtual_space.low_boundary());
++		clear_all();
++		os::release_memory(_virtual_space.low_boundary(), _virtual_space.high_boundary()-_virtual_space.low_boundary());
++	}
++	bool allocate(MemRegion mr);
++	// field getter
++        Mutex* lock() const
++	{
++		return _lock;
++	}
++	// inquiries
++        HeapWord* startWord()   const
++	{
++		return _bmStartWord;
++	}
++	size_t    sizeInWords() const
++	{
++		return _bmWordSize;
++	}
++	size_t    sizeInBits()  const
++	{
++		return _bm.size();
++	}
++	// the following is one past the last word in space
++	HeapWord* endWord()     const
++	{
++		return _bmStartWord + _bmWordSize;
++	}
++	size_t heapWordToOffset(HeapWord* addr) const {
++		  return (pointer_delta(addr, _bmStartWord)) >> _shifter;
++	}
++	// reading marks
++	bool isMarked(HeapWord* addr) const {
++		//assert_locked();
++		assert(_bmStartWord <= addr && addr < (_bmStartWord + _bmWordSize),"outside underlying space?");
++		return _bm.at(heapWordToOffset(addr));
++	}
++	//do not lock checks
++	bool par_isMarked(HeapWord* addr) const {
++		assert(_bmStartWord <= addr && addr < (_bmStartWord + _bmWordSize),
++		           "outside underlying space?");
++		return _bm.at(heapWordToOffset(addr));
++	}
++	bool isUnmarked(HeapWord* addr) const {
++		//assert_locked();
++		assert(_bmStartWord <= addr && addr < (_bmStartWord + _bmWordSize),
++		             "outside underlying space?");
++		return !_bm.at(heapWordToOffset(addr));
++	}
++	// writing marks
++	void mark(HeapWord* addr) {
++		//assert_locked();
++		assert(_bmStartWord <= addr && addr < (_bmStartWord + _bmWordSize),
++		             "outside underlying space?");
++		_bm.set_bit(heapWordToOffset(addr));
++	}
++	// For marking by parallel GC threads;
++	// returns true if we did, false if another thread did
++	bool par_mark(HeapWord* addr) {
++		//assert_locked();
++		assert(_bmStartWord <= addr && addr < (_bmStartWord + _bmWordSize),
++		             "outside underlying space?");
++		return _bm.par_at_put(heapWordToOffset(addr), true);
++	}
++	void clear_all() {
++		//assert_locked();
++		// CMS bitmaps are usually cover large memory regions
++		_bm.clear_large();
++		return;
++	}
++};
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gc_implementation/shared/markSweep.inline.hpp
+--- a/src/share/vm/gc_implementation/shared/markSweep.inline.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/gc_implementation/shared/markSweep.inline.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -27,6 +27,9 @@
+ 
+ #include "gc_implementation/shared/markSweep.hpp"
+ #include "gc_interface/collectedHeap.hpp"
++//<GCIH_ADD comment="include GCIH header">
++#include "gcih/gcih.inline.hpp"
++//</GCIH_ADD>
+ #include "utilities/stack.inline.hpp"
+ #ifndef SERIALGC
+ #include "gc_implementation/parallelScavenge/psParallelCompact.hpp"
+@@ -55,6 +58,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH during follow_root">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if (!obj->mark()->is_marked()) {
+       mark_object(obj);
+       obj->follow_contents();
+@@ -68,6 +76,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH during mark_and_follow">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if (!obj->mark()->is_marked()) {
+       mark_object(obj);
+       obj->follow_contents();
+@@ -80,6 +93,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH during mark_and_push">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if (!obj->mark()->is_marked()) {
+       mark_object(obj);
+       _marking_stack.push(obj);
+@@ -97,6 +115,11 @@
+   T heap_oop = oopDesc::load_heap_oop(p);
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj     = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="In-GCIH object is never encoded with new address within header, so in case adjust_pointer is invoked, prevent this happening">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     oop new_obj = oop(obj->mark()->decode_pointer());
+     assert(new_obj != NULL ||                         // is forwarding ptr?
+            obj->mark() == markOopDesc::prototype() || // not gc marked?
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gcih/gcih.cpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gcih/gcih.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,538 @@
++#include "gcih/gcih.hpp"
++#include "gcih/gcih.inline.hpp"
++#include "gcih/vmGCIHOperations.hpp"
++#include "memory/gcLocker.hpp"
++#include "oops/oop.inline.hpp"
++#include "runtime/interfaceSupport.hpp"
++#include "runtime/mutexLocker.hpp"
++#include "runtime/os.hpp"
++#include "runtime/thread.hpp"
++#include "runtime/vmThread.hpp"
++#include "utilities/defaultStream.hpp"
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <sys/mman.h>
++
++// GCIHMoveInOopClosure implementation
++
++void GCIHMoveInOopClosure::do_oop(oop* obj) {
++  if(obj == 0) return;
++
++  oop p = oopDesc::load_heap_oop(obj);
++  if (p == 0) return;
++  if (p->is_klass() || p->is_perm()) {
++    if (GCInvisibleHeap::_top_klass_addr < p) {
++      GCInvisibleHeap::_top_klass_addr = p;
++    }
++    return;
++  }
++
++  /* We borrow the monitor state as moved-in state and
++   * address of monitoring object as moved-in address
++   * So far, safe. It's safe because there should be 
++   * no objects being locked in the object graph to
++   * move in, according to the usage limitation of GCIH.
++   */
++  if (p->mark()->has_monitor()) {
++    ObjectMonitor* obj_monitor = p->mark()->monitor();
++    if (GCInvisibleHeap::from()->contains(address(obj_monitor))) {
++      // the object is already moved in;
++      // obj_monitor is a faked forwarding pointer
++      oopDesc::store_heap_oop(obj, (oop)obj_monitor);
++    }
++
++    if (unlikely(VerifyGCIH) && !GCInvisibleHeap::contains(obj_monitor)) {
++      ResourceMark rm;
++      gclog_or_tty->print_cr("GCIH warning: an object with a monitor is being moved into GCIH.");
++      gclog_or_tty->print_cr("%s @ " INTPTR_FORMAT, p->blueprint()->name(), obj_monitor);
++    }
++    return; // TODO better exception handling later
++  }
++
++  int size = p->size(); // size in HeapWords
++  //HeapWord* new_addr = GCInvisibleHeap::allocate_or_fail(size, JavaThread::current());
++  HeapWord* new_addr = GCInvisibleHeap::allocate(size);
++  if (new_addr == NULL) {
++	  gclog_or_tty->print_cr("gcih two small.....");
++    return; // will exceed size limit of GCIH, need more specific exception handling here
++  }
++  oop res = (oop) memcpy((void*) new_addr, (void*) p, size * sizeof(HeapWord));
++    
++  if (unlikely(VerifyGCIH)) {
++    if((uintptr_t) p->mark() != (uintptr_t) 1) {
++      ResourceMark rm;
++
++      gclog_or_tty->print_cr("p == " INTPTR_FORMAT
++                             "----p.mark == " INTPTR_FORMAT
++                             "---p.klass == " INTPTR_FORMAT
++                             "--new_addr == " INTPTR_FORMAT
++                             "---p.name() == %s",
++                             p, p->mark(), p->klass(),
++                             new_addr, p->blueprint()->name());
++    }
++  }
++
++  /* We borrow address of monitoring object as
++   * moved-in address. So far, safe
++   */
++  p->set_mark(p->mark()->encode((ObjectMonitor*) res));
++    
++  //preserve the oop we move to restore mark
++  GCInvisibleHeap::_preserved_oop.push(p);
++
++  oopDesc::store_heap_oop(obj, res);
++  /*
++   * push it into stack as a root oop which will be iterate later
++   */
++  GCInvisibleHeap::_root_oop.push(res);
++}
++
++void GCIHMoveInOopClosure::do_oop(narrowOop* p) {
++  oop temp_oop = oopDesc::decode_heap_oop_not_null(*p);
++  if (temp_oop == NULL) return;
++  do_oop(&temp_oop);
++  if (temp_oop != NULL) {
++    *p= oopDesc::encode_heap_oop_not_null(temp_oop);
++  }
++}
++
++// GCIHSpace implementation
++
++bool GCIHSpace::initialize(MemRegion mr) {
++  HeapWord* start = mr.start();
++  _bottom = start;
++  _top = start;
++  _end = mr.end();
++  gclog_or_tty->print_cr("gcih_start == 0x%llx---gcih_end == 0x%llx", start, _end);
++  
++  // NOTE: GCIH used to set the mmap flags to
++  //         MAP_SHARED | MAP_NORESERVE | MAP_ANONYMOUS | MAP_FIXED
++  //       but os::commit_memory() set the mmap flags to
++  //         MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS
++  bool succeed = os::commit_memory((char*) _bottom, size());
++  
++  if (unlikely(TraceGCIH)) {
++    gclog_or_tty->print_cr("GCIHSpace %s: [" INTPTR_FORMAT ", "
++                             INTPTR_FORMAT "), " SIZE_FORMAT " bytes",
++                           succeed ? "initialized" : "os::commit_memory failed",
++                           _bottom, _end, size());
++  }
++  
++  return succeed;
++}
++
++bool GCIHSpace::dispose() {
++  if (!os::uncommit_memory((char*) _bottom, size())) {
++    if (unlikely(TraceGCIH)) {
++      gclog_or_tty->print_cr("GCIHSpace os::uncommit_memory failed: ["
++                               INTPTR_FORMAT ", " INTPTR_FORMAT "), "
++                               SIZE_FORMAT " bytes",
++                             _bottom, _end, size());
++    }
++    return false;
++  }
++  return true;
++}
++
++bool GCIHSpace::enable() {
++  return os::unguard_memory((char*) bottom(), size());
++}
++
++bool GCIHSpace::disable() {
++  return os::guard_memory((char*) bottom(), size());
++}
++
++// GCInvisibleHeap implementation
++
++MemRegion  GCInvisibleHeap::_reserved;
++GCIHMoveInOopClosure GCInvisibleHeap::_move_in_closure;
++
++GCIHSpace* GCInvisibleHeap::_from_space = NULL;
++GCIHSpace* GCInvisibleHeap::_to_space = NULL;
++oop        GCInvisibleHeap::_top_klass_addr = NULL;
++
++Stack<oop> GCInvisibleHeap::_preserved_oop;
++Stack<oop> GCInvisibleHeap::_root_oop;
++
++inline jint check_compressed_oops_consistency() {
++  if (UseCompressedOops) {
++    
++  }
++  return JNI_OK;
++}
++
++jint GCInvisibleHeap::initialize() {
++  jint status = check_compressed_oops_consistency();
++  if (status != JNI_OK) {
++    return status;
++  }
++  
++  size_t alignment = Generation::GenGrain;
++  address gcih_address = (address) GCIHBaseAddress;
++  GCIHSize += 200*1024*1024;
++  size_t total_size = GCIHSize;
++  ReservedHeapSpace gcih_rs(total_size, alignment,
++                            UseLargePages, (char*) gcih_address);
++  if (!gcih_rs.is_reserved()) {
++    jio_fprintf(defaultStream::error_stream(),
++      "GCIH initialize failed. Could not reserve memory: ");
++    jio_fprintf(defaultStream::error_stream(),
++      SIZE_FORMAT " bytes @ " INTPTR_FORMAT "\n",
++      total_size, gcih_address);
++    return JNI_ENOMEM;
++  }
++  
++  MemRegion reserved((HeapWord*) gcih_rs.base(), gcih_rs.size() / sizeof(HeapWord));
++  size_t space_word_size = reserved.word_size();
++  
++  GCIHSpace* from_space = new GCIHSpace();
++  if (!from_space->initialize(MemRegion(reserved.start(), space_word_size))) {
++    from_space->dispose();
++    delete from_space;
++    
++    return JNI_ENOMEM;
++  }
++  
++  _reserved = reserved;
++  _from_space = from_space;
++  
++  if (unlikely(TraceGCIH)) {
++    gclog_or_tty->print_cr("GCIH reserved: [" INTPTR_FORMAT ", " INTPTR_FORMAT ")",
++                           reserved.start(), reserved.end());
++    gclog_or_tty->print_cr("GC heap range: [" INTPTR_FORMAT ", " INTPTR_FORMAT ")",
++                           Universe::heap()->base(),
++                           Universe::heap()->reserved_region().end());
++  }
++  
++  return JNI_OK;
++}
++
++bool GCInvisibleHeap::dispose() {
++  bool succeed = true;
++  
++  _top_klass_addr = NULL;
++  
++  if (_from_space != NULL) {
++    succeed = succeed && _from_space->dispose();
++    delete _from_space;
++    _from_space = NULL;
++  }
++  if (unlikely(TraceGCIH)) {
++    gclog_or_tty->print_cr("GCIH disposed");
++  }
++  
++  return succeed;
++}
++
++void GCInvisibleHeap::swap_spaces() {
++  from()->reset_top();
++  _top_klass_addr = NULL;
++}
++
++/*
++ * Should we process the perm gen (during GC)?
++ * Checking if the current thread is the VM thread guarantees we're in a VM_Operation,
++ * which avoids CMS remark to process the perm gen
++ */
++inline bool GCInvisibleHeap::should_process_perm_gen() {
++  return _top_klass_addr > NULL && // implies move_in() has been called at least once
++         SafepointSynchronize::is_at_safepoint() &&
++         Thread::current()->is_VM_thread();
++}
++
++/*
++ * process the part of PermGen possibly reachable from GCIH
++ */
++void GCInvisibleHeap::process_perm_gen(OopClosure* blk) {
++  if (should_process_perm_gen()) {
++    // doesn't work with ParallelScavenge or G1 yet: they don't use SharedHeap
++    Generation* perm_gen = ((SharedHeap*) Universe::heap())->perm_gen();
++    MemRegion used_region = perm_gen->used_region();
++    MemRegion mr(used_region.start(), ((HeapWord*) _top_klass_addr) + 1);
++    
++    if (unlikely(TraceGCIH)) {
++      gclog_or_tty->print("[GCInvisibleHeap::process_perm_gen, ");
++      gclog_or_tty->print("PermGen MemRegion: [" INTPTR_FORMAT ", " INTPTR_FORMAT "), ",
++                          used_region.start(), used_region.end());
++      gclog_or_tty->print_cr("ToScan MemRegion: [" INTPTR_FORMAT ", " INTPTR_FORMAT ")",
++                             mr.start(), mr.end());
++    }
++    
++    perm_gen->oop_iterate(mr, blk);
++  }
++}
++
++void CheckGCIHOopClosure::do_oop(oop* p) {
++  if (p != 0 && *p != 0 && !(*p)->is_klass() && !GCInvisibleHeap::contains(*p)) {
++    ResourceMark rm;
++    gclog_or_tty->print_cr("suns--*p == 0x%llx---*p.name == %s", *p, (*p)->blueprint()->external_name());
++  }
++}
++
++void CheckGCIHOopClosure::do_oop(narrowOop* p) {
++  oop real_oop = oopDesc::load_decode_heap_oop_not_null(p);
++  if (!oopDesc::is_null(real_oop)) {
++    do_oop(&real_oop);
++  }
++}
++
++void GCInvisibleHeap::javaHeapMemIterate() {
++  CheckGCIHOopClosure check_gcih_oop_closure;
++  HeapWord* obj_start_addr = from()->bottom(),  *region_end_addr = from()->top();
++  gclog_or_tty->print_cr("\nobj_start_addr = " INTPTR_FORMAT "------region_end_addr = " INTPTR_FORMAT "\n",
++                         obj_start_addr, region_end_addr);
++  size_t size = 0;
++  long counter = 0;
++  while (obj_start_addr < region_end_addr) {
++    ++counter;
++    oop obj = oop(obj_start_addr);
++    obj->oop_iterate(&check_gcih_oop_closure);
++    size = obj->size();
++    obj_start_addr += size;
++  }
++  gclog_or_tty->print_cr("forest oop counter == %lld", counter);
++}
++
++void GCInvisibleHeap::adjust_klass_pointers() {
++  if (from() != NULL) {
++    HeapWord* p = from()->bottom();
++    while (p < from()->top()) {
++      int size = oop(p)->size();
++      oop klass = oop(p)->klass();
++      void* moved_to = klass->mark()->decode_pointer();
++      if (moved_to != NULL) {
++        oop(p)->set_klass(klassOop(moved_to));
++      }
++      
++      p += size;
++    }
++  }
++}
++
++/*
++ * restore oop mark of moved in oops
++ */
++void GCInvisibleHeap::restore_mark() {
++  while(!_preserved_oop.is_empty()) {
++    oop p = _preserved_oop.pop();
++    p->set_mark(p->blueprint()->prototype_header());
++  }
++}
++
++/*
++ * Move object from java heap to GCIH
++ */
++oop GCInvisibleHeap::move_in(oop p) {
++  GCInvisibleHeap::_move_in_closure.do_oop(&p);
++  while (!GCInvisibleHeap::_root_oop.is_empty()) {
++    oop p = GCInvisibleHeap::_root_oop.pop();
++    p->oop_iterate(&GCInvisibleHeap::_move_in_closure);
++  }
++  return p;
++}
++
++/////////////////////////
++// exported JNI functions
++extern "C" {
++  /*
++   * Return GCIH start address
++   */
++  address GCIH_GetStartAddress() {
++    return (address) GCInvisibleHeap::reserved().start();
++  }
++
++  /*
++   * Return GCIH end address
++   */
++  address GCIH_GetEndAddress() {
++    return (address) GCInvisibleHeap::reserved().end();
++  }
++
++  /*
++   * Return GCIH next available address
++   */
++  address GCIH_GetNextAvailableAddress() {
++    return (address) GCInvisibleHeap::from()->top();
++  }
++  
++  /*
++   * Return the capacity of GCIH in bytes
++   */
++  jlong GCIH_GetCapacity() {
++    return GCInvisibleHeap::capacity();
++  }
++ 
++  /*
++   * Return the amount of current used GCIH space in bytes
++   */
++  jlong GCIH_GetUsed() {
++    return GCInvisibleHeap::used();
++  }
++
++  /*
++   * A facility function for debugging
++   */
++  void GCIH_Foo() {
++  }
++  
++  /*
++   * A facility function for debugging
++   */
++  address GCIH_GetNarrowOopBase() {
++    return Universe::narrow_oop_base();
++  }
++  
++  /*
++   * A facility function for debugging
++   */
++  int GCIH_GetNarrowOopShift() {
++    return Universe::narrow_oop_shift();
++  }
++  
++  /*
++   * A facility function for debugging
++   */
++  bool GCIH_IsUseCompressedOops() {
++    return UseCompressedOops;
++  }
++  
++  /*
++   * Let Java-level code know whether GCIH is in use or not
++   */
++  bool GCIH_IsUseGCIH() {
++    return UseGCIH;
++  }
++
++  /*
++   * A facility function for debugging
++   */
++  void GCIH_PrintStackInfo() {
++    tty->print_cr("Java thread count: %d",Threads::number_of_threads());
++    Threads::print_on_error(tty, Thread::current(), NULL, 0);
++  }
++
++  /*
++   * A facility function for debugging
++   */
++  void GCIH_PrintHeapInfo() {
++    Universe::print_on(tty);
++  }
++
++  void GCIH_outputMemContent(JNIEnv* env, jclass unused, jobject obj) {
++    oop p = JNIHandles::resolve(obj);
++    if (!oopDesc::is_null(p)) {
++      oop* c = (oop*) p;
++      printf("--------------------" INTPTR_FORMAT "---------%d----------\n", p, sizeof(oop));
++      for (int i = 0; i < 10; i++) {
++        printf(INTPTR_FORMAT ": " INTPTR_FORMAT "\n", c, *(jlong*)c);
++        c++;
++        printf(INTPTR_FORMAT ": " INTPTR_FORMAT "\n", c, *(jlong*)c);
++        c++;
++      } 
++      printf("---------------------------------------\n");
++    } else {
++      printf("--------------------" INTPTR_FORMAT " (null pointer) -----\n", p);
++    }
++  }
++
++  void GCIH_Info(JNIEnv* env, jclass cls, jobject obj, jstring s) {
++    ResourceMark rm;
++
++    oop p = JNIHandles::resolve(obj);
++    const char* c_str = env->GetStringUTFChars(s, 0);
++    gclog_or_tty->print_cr("Info()---obj=" INTPTR_FORMAT "--name=%s--string == %s",
++                           p, p->blueprint()->external_name(), c_str);
++    env->ReleaseStringUTFChars(s, c_str);
++  }
++
++  /*
++   * Move object from Java heap to GCIH
++   */
++  jobject GCIH_MoveIn(JNIEnv* env, jclass cls, jobject obj) {
++    if (!UseGCIH) return NULL;
++    
++    // for PrintGCIH
++    size_t old_used = GCInvisibleHeap::from()->used();
++    
++    oop result;
++    
++    {
++      TraceTime tt("GCIH MoveIn ", true, true, gclog_or_tty);
++      
++      // cannot allow safepoints to be taken while move_in() is in progress
++      debug_only(No_Safepoint_Verifier no_safepoint;)
++      MutexLockerEx ml(Safepoint_lock, Mutex::_no_safepoint_check_flag);
++      // JNIHandles::resolve() and make_local() take care of null checking
++      result = GCInvisibleHeap::move_in(JNIHandles::resolve(obj));
++      GCInvisibleHeap::restore_mark();
++      gclog_or_tty->print(" GCIH used == %d M byte", GCInvisibleHeap::from()->used() / M);
++    }
++    
++    if (unlikely(VerifyGCIH)) {
++      TraceTime tt("GCIH CheckOop", true, true, gclog_or_tty);
++      
++      ThreadInVMfromNative tiv(JavaThread::current());
++      VM_Oop_Check_Operation vm_oop_check_op;
++      VMThread::execute(&vm_oop_check_op);
++    }
++    
++    if (PrintGCIH) {
++      gclog_or_tty->print_cr("[GCIH MoveIn (" SIZE_FORMAT "->"
++                               SIZE_FORMAT ") @ " INTPTR_FORMAT "]",
++                             old_used, GCInvisibleHeap::from()->used(),
++                             GCInvisibleHeap::from()->bottom());
++    }
++
++    return JNIHandles::make_local(env, result);
++  }
++  
++  /*
++   * Tell GCIH to swap the semispaces
++   */
++  void GCIH_MoveOut() {
++    if (UseGCIH) {
++      TraceTime tt("GCIH MoveOut", true, true, gclog_or_tty);
++      {
++        ThreadInVMfromNative tiv(JavaThread::current());
++        GCIH_adjustOopAddressOperation gcih_adjust_oop_address_vmop;
++        VMThread::execute(&gcih_adjust_oop_address_vmop);
++      }
++        GCInvisibleHeap::swap_spaces();
++      if (PrintGCIH) {
++        gclog_or_tty->print_cr("[GCIH MoveOut]");
++      }
++    }
++  }
++  
++  /*
++   * Get address of java object
++   */
++  void* GCIH_GetObjectAddress(JNIEnv* env, jclass cls, jobject obj) {
++	  return JNIHandles::resolve(obj);
++  }
++
++  /*
++   * Get size of java object
++   */
++  int GCIH_GetObjectSize(JNIEnv* env , jclass cls, jobject obj) {
++    oop o = JNIHandles::resolve(obj);
++    if (o != NULL) {
++      return o->size() * HeapWordSize;
++    }
++    return -1; 
++  }
++
++  /*
++   * Get mark word of Java object
++   */
++  markOop GCIH_GetObjectMark(JNIEnv* env, jclass cls, jobject obj) {
++    oop o = JNIHandles::resolve(obj);
++    if (o != NULL) {
++      return o->mark();
++    }
++    return (markOop)-1;
++  }
++}
++
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gcih/gcih.hpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gcih/gcih.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,104 @@
++#ifndef SHARE_VM_GCIH_GCIH_HPP
++#define SHARE_VM_GCIH_GCIH_HPP
++
++#include "oops/oop.hpp"
++#include "utilities/stack.hpp"
++
++// Invariant: bottom() and end() are on page_size boundaries and  
++// bottom() <= top() <= end()  
++// top() is inclusive and end() is exclusive.
++class GCIHSpace { // consider inheriting from memory/space
++  HeapWord* _bottom;
++  HeapWord* _top;
++  HeapWord* _end;
++public:
++  GCIHSpace()  { }
++  ~GCIHSpace() {
++    _bottom = _top = _end = NULL;
++  }
++  
++  bool initialize(MemRegion mr);
++  bool dispose();
++  
++  // Accessors
++  inline HeapWord* bottom() const      { return _bottom; }
++  inline HeapWord* top() const         { return _top; }
++  inline HeapWord* end() const         { return _end; }
++  inline void set_top(HeapWord* value) { _top = value; }
++  inline void reset_top()              { _top = _bottom; }
++  
++  // size in bytes
++  inline size_t size() const           { return address(_end) - address(_bottom); }
++  inline size_t used() const           { return address(_top) - address(_bottom); }
++  
++  inline bool contains(const void* addr) {
++    return addr >= (void*) _bottom && addr < (void*) _end; // TODO should we use _end or _top here?
++  }
++  
++  inline HeapWord* allocate(size_t size);
++  
++  // page protections methods
++  bool enable();
++  bool disable();
++};
++
++class GCIHMoveInOopClosure: public OopClosure {
++public:
++  void do_oop(oop* o);
++  void do_oop(narrowOop* p);
++};
++
++class CheckGCIHOopClosure: public OopClosure {
++public:
++  void do_oop(oop* o);
++  void do_oop(narrowOop* p);
++};
++
++class GCInvisibleHeap: public AllStatic {
++  // boundaries
++  static MemRegion _reserved;
++  
++  // semispaces
++  static GCIHSpace* _from_space;
++  static GCIHSpace* _to_space;
++  
++  // move_in closure
++  static GCIHMoveInOopClosure _move_in_closure;
++public:
++  // for restoring mark words of the original moved oops
++  static Stack<oop> _preserved_oop;
++  static Stack<oop> _root_oop;
++  
++  // klass bookkeeping
++  static oop _top_klass_addr;
++public:
++  static jint initialize();
++  static bool dispose();
++  
++  static void  javaHeapMemIterate();
++  // Accessors
++  static GCIHSpace* from()     { return _from_space; }
++  static GCIHSpace* to()       { return _to_space; }
++  static MemRegion  reserved() { return _reserved; }
++  
++  static size_t capacity()     { return _from_space ? _from_space->size() : 0; }
++  static size_t used()         { return _from_space ? _from_space->used() : 0; }
++  
++  static bool contains(const void* p);
++  static bool contains(const oop p); // replace GCIH_isOopInGCIH TODO const needed when this class is no longer a static class
++
++  static HeapWord* allocate(size_t size); // would require locking, but we're doing single-threaded move in anyway, so no locks
++  static HeapWord* allocate_or_fail(size_t size, TRAPS);
++  static oop  move_in(const oop p);
++  static void restore_mark();
++  static void swap_spaces();
++  
++  // GC interactions
++  static bool should_process_perm_gen();
++  static void process_perm_gen(OopClosure* blk);
++  static void adjust_klass_pointers(); // TODO const?
++  static void set_gcih_internal_reference_null();
++};
++
++#endif // SHARE_VM_GCIH_GCIH_HPP
++
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gcih/gcih.inline.hpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gcih/gcih.inline.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,68 @@
++#ifndef SHARE_VM_GCIH_GCIH_INLINE_HPP
++#define SHARE_VM_GCIH_GCIH_INLINE_HPP
++
++#include "gcih/gcih.hpp"
++#include "memory/universe.hpp"
++
++#ifdef __GNUC__
++  #define likely(x)     __builtin_expect((x),1)
++  #define unlikely(x)   __builtin_expect((x),0)
++#else
++  #define likely(x)     (x)
++  #define unlikely(x)   (x)
++#endif // __GNUC__
++
++inline bool GCInvisibleHeap::contains(const void* p) {
++  return _reserved.contains(p);
++}
++
++/*
++ * If oop points to object in GCIH return true
++ */
++inline bool GCInvisibleHeap::contains(const oop p) {
++  return contains((const void*) p);
++}
++
++// size is in unit of HeapWords
++inline HeapWord* GCInvisibleHeap::allocate_or_fail(size_t size, TRAPS) {
++  HeapWord* new_addr = allocate(size);
++  if (new_addr == NULL) {
++    report_java_out_of_memory("GCIH full");
++    THROW_OOP_0(Universe::out_of_memory_error_gcih());
++  }
++  return new_addr;
++}
++
++// size is in unit of HeapWords
++inline HeapWord* GCInvisibleHeap::allocate(size_t size) {
++  assert(from() != NULL, "GCIH has to be initialized before allocation in it");
++  HeapWord* new_addr = from()->allocate(size);
++  if (PrintGC && UseGCIH) {
++    if (new_addr == NULL) {
++      gclog_or_tty->print_cr(" (GCIH failed to allocate " SIZE_FORMAT " bytes) ",
++                             size * HeapWordSize);
++    } else if (unlikely(TraceGCIH)) {
++      gclog_or_tty->print_cr(" (GCIH allocated " SIZE_FORMAT " bytes @ " INTPTR_FORMAT ") ",
++                             size * HeapWordSize, new_addr);
++    }
++  }
++  return new_addr;
++}
++
++// this method is only called by GCInvisibleHeap::move_in(),
++// which should be called from a Java thread.
++// size is in unit of HeapWords.
++inline HeapWord* GCIHSpace::allocate(size_t size) {
++  HeapWord* obj = top();
++  if (pointer_delta(end(), obj) >= size) {
++    HeapWord* new_top = obj + size;
++    set_top(new_top);
++    assert(is_aligned(obj) && is_aligned(new_top), "checking alignment");
++    return obj;
++  } else {
++    return NULL;
++  }
++}
++
++#endif // SHARE_VM_GCIH_GCIH_INLINE_HPP
++
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gcih/vmGCIHOperations.cpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gcih/vmGCIHOperations.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,15 @@
++#include "gc_implementation/parNew/parNewGeneration.hpp"
++#include "gcih/vmGCIHOperations.hpp"
++#include "gcih/gcih.hpp"
++
++void VM_Oop_Check_Operation::doit() {
++  GenCollectedHeap* gch = GenCollectedHeap::heap();
++  ParNewGeneration* png = (ParNewGeneration*) gch->get_gen(0);
++  //png->check_oop();
++}
++void GCIH_adjustOopAddressOperation::doit() {
++  GenCollectedHeap* gch = GenCollectedHeap::heap();
++  ParNewGeneration* png = (ParNewGeneration*) gch->get_gen(0);
++  png->gcih_adjust_oop_address();
++  return;
++}
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/gcih/vmGCIHOperations.hpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/gcih/vmGCIHOperations.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,24 @@
++#ifndef SHARE_VM_GCIH_VMGCIHOPERATIONS_HPP
++#define SHARE_VM_GCIH_VMGCIHOPERATIONS_HPP
++
++#include "runtime/vm_operations.hpp"
++
++class VM_Oop_Check_Operation: public VM_Operation {
++public:
++  VM_Oop_Check_Operation() { }
++  VMOp_Type type() const   { return VMOp_OopCheck; }
++  void doit();
++  bool doit_prologue()     { Heap_lock->lock(); return true; }
++  void doit_epilogue()     { Heap_lock->unlock(); }
++};
++
++class GCIH_adjustOopAddressOperation : public VM_Operation
++{
++      public:
++             virtual void doit();
++             virtual VMOp_Type type() const { return VMOp_AdjustOopAddress; }
++             virtual bool doit_prologue(){Heap_lock->lock(); return true;}
++             virtual void doit_epilogue(){Heap_lock->unlock();}
++};
++#endif // SHARE_VM_GCIH_VMGCIHOPERATIONS_HPP
++
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/genCollectedHeap.cpp
+--- a/src/share/vm/memory/genCollectedHeap.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/genCollectedHeap.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -739,6 +739,11 @@
+     CodeBlobToOopClosure code_roots(not_older_gens, /*do_marking=*/ do_code_marking);
+     SharedHeap::process_strong_roots(activate_scope, collecting_perm_gen, so,
+                                      not_older_gens, &code_roots, older_gens);
++    //<GCIH_ADD comment="process the part of PermGen possibly reachable from GCIH">
++    // check if GCIH is in use
++    // TODO try the following to skip over ParNew: if (level > 0) {
++    GCInvisibleHeap::process_perm_gen(not_older_gens);
++    //</GCIH_ADD>
+   }
+ 
+   if (younger_gens_as_roots) {
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/genCollectedHeap.hpp
+--- a/src/share/vm/memory/genCollectedHeap.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/genCollectedHeap.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -38,6 +38,7 @@
+   friend class GenCollectorPolicy;
+   friend class Generation;
+   friend class DefNewGeneration;
++  friend class ParNewGeneration;
+   friend class TenuredGeneration;
+   friend class ConcurrentMarkSweepGeneration;
+   friend class CMSCollector;
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/genMarkSweep.cpp
+--- a/src/share/vm/memory/genMarkSweep.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/genMarkSweep.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -30,6 +30,9 @@
+ #include "code/codeCache.hpp"
+ #include "code/icBuffer.hpp"
+ #include "gc_interface/collectedHeap.inline.hpp"
++//<GCIH_ADD comment="include GCIH header">
++#include "gcih/gcih.hpp"
++//</GCIH_ADD>
+ #include "memory/genCollectedHeap.hpp"
+ #include "memory/genMarkSweep.hpp"
+ #include "memory/genOopClosures.inline.hpp"
+@@ -332,6 +335,12 @@
+   VALIDATE_MARK_SWEEP_ONLY(_live_oops_index_at_perm = _live_oops_index);
+   CompactPoint perm_cp(pg, NULL, NULL);
+   pg->prepare_for_compaction(&perm_cp);
++  
++  //<GCIH_ADD comment="now all new address of klass have been updated
++  //which is encoded in oop header,
++  //we need to update klass pointers of objs in gcih to reflect the change">
++  GCInvisibleHeap::adjust_klass_pointers();
++  //</GCIH_ADD>
+ }
+ 
+ class GenAdjustPointersClosure: public GenCollectedHeap::GenClosure {
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/genOopClosures.inline.hpp
+--- a/src/share/vm/memory/genOopClosures.inline.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/genOopClosures.inline.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -25,6 +25,9 @@
+ #ifndef SHARE_VM_MEMORY_GENOOPCLOSURES_INLINE_HPP
+ #define SHARE_VM_MEMORY_GENOOPCLOSURES_INLINE_HPP
+ 
++//<GCIH_ADD comment="include GCIH header">
++#include "gcih/gcih.inline.hpp"
++//</GCIH_ADD>
+ #include "memory/cardTableRS.hpp"
+ #include "memory/defNewGeneration.hpp"
+ #include "memory/genCollectedHeap.hpp"
+@@ -79,6 +82,12 @@
+   // Should we copy the obj?
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH, it seems for ParNew and CMS, ScanClosure is not used,
++    //but we check this here cause it is not finally confirmed">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if ((HeapWord*)obj < _boundary) {
+       assert(!_g->to()->is_in_reserved(obj), "Scanning field twice?");
+       oop new_obj = obj->is_forwarded() ? obj->forwardee()
+@@ -102,6 +111,12 @@
+   // Should we copy the obj?
+   if (!oopDesc::is_null(heap_oop)) {
+     oop obj = oopDesc::decode_heap_oop_not_null(heap_oop);
++    //<GCIH_ADD comment="Restrict to access GCIH, it seems for ParNew and CMS, FastScanClosure is not used,
++    //but we check this here cause it is not finally confirmed">
++    if (GCInvisibleHeap::contains(obj)) {
++      return;
++    }
++    //</GCIH_ADD>
+     if ((HeapWord*)obj < _boundary) {
+       assert(!_g->to()->is_in_reserved(obj), "Scanning field twice?");
+       oop new_obj = obj->is_forwarded() ? obj->forwardee()
+@@ -123,6 +138,12 @@
+ template <class T> inline void ScanWeakRefClosure::do_oop_work(T* p) {
+   assert(!oopDesc::is_null(*p), "null weak reference?");
+   oop obj = oopDesc::load_decode_heap_oop_not_null(p);
++  //<GCIH_ADD comment="Restrict to access GCIH, it seems for ParNew and CMS, if no weak refernce defined, ScanWeakRefClosure is not used,
++  //but we check this here cause it is not finally confirmed">
++  if (GCInvisibleHeap::contains(obj)) {
++    return;
++  }
++  //</GCIH_ADD>
+   // weak references are sometimes scanned twice; must check
+   // that to-space doesn't already contain this object
+   if ((HeapWord*)obj < _boundary && !_g->to()->is_in_reserved(obj)) {
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/specialized_oop_closures.hpp
+--- a/src/share/vm/memory/specialized_oop_closures.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/specialized_oop_closures.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -42,6 +42,11 @@
+ class ScanClosure;
+ class FastScanClosure;
+ class FilteringClosure;
++//GCIH
++class GCIH_ParFollowRootClosure;
++class GCIH_ParDoVoidWithDoBarrierClosure;
++class GCIH_ParDoVoidWithoutDoBarrierClosure;
++class NullGCIHOopClosure;
+ // ParNew
+ class ParScanWithBarrierClosure;
+ class ParScanWithoutBarrierClosure;
+@@ -81,7 +86,11 @@
+ #ifndef SERIALGC
+ #define SPECIALIZED_OOP_OOP_ITERATE_CLOSURES_P(f)       \
+   f(ParScanWithBarrierClosure,_nv)                      \
+-  f(ParScanWithoutBarrierClosure,_nv)
++  f(ParScanWithoutBarrierClosure,_nv)			\
++  f(GCIH_ParFollowRootClosure,_nv)			\
++  f(GCIH_ParDoVoidWithDoBarrierClosure,_nv)	        \
++  f(GCIH_ParDoVoidWithoutDoBarrierClosure,_nv)          \
++  f(NullGCIHOopClosure, _nv);
+ #else  // SERIALGC
+ #define SPECIALIZED_OOP_OOP_ITERATE_CLOSURES_P(f)
+ #endif // SERIALGC
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/universe.cpp
+--- a/src/share/vm/memory/universe.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/universe.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -148,6 +148,9 @@
+ oop Universe::_out_of_memory_error_perm_gen           = NULL;
+ oop Universe::_out_of_memory_error_array_size         = NULL;
+ oop Universe::_out_of_memory_error_gc_overhead_limit  = NULL;
++//<GCIH_ADD comment="error object for GCIH allocation support">
++oop Universe::_out_of_memory_error_gcih               = NULL;
++//</GCIH_ADD>
+ objArrayOop Universe::_preallocated_out_of_memory_error_array = NULL;
+ volatile jint Universe::_preallocated_out_of_memory_error_avail_count = 0;
+ bool Universe::_verify_in_progress                    = false;
+@@ -270,6 +273,9 @@
+   f->do_oop((oop*)&_out_of_memory_error_perm_gen);
+   f->do_oop((oop*)&_out_of_memory_error_array_size);
+   f->do_oop((oop*)&_out_of_memory_error_gc_overhead_limit);
++  //<GCIH_ADD comment="error object for GCIH allocation support">
++  f->do_oop((oop*)&_out_of_memory_error_gcih);
++  //</GCIH_ADD>
+   if (_preallocated_out_of_memory_error_array != (oop)NULL) {   // NULL when DumpSharedSpaces
+     f->do_oop((oop*)&_preallocated_out_of_memory_error_array);
+   }
+@@ -686,7 +692,10 @@
+   return ((throwable() != Universe::_out_of_memory_error_java_heap) &&
+           (throwable() != Universe::_out_of_memory_error_perm_gen)  &&
+           (throwable() != Universe::_out_of_memory_error_array_size) &&
+-          (throwable() != Universe::_out_of_memory_error_gc_overhead_limit));
++          (throwable() != Universe::_out_of_memory_error_gc_overhead_limit) &&
++          //<GCIH_ADD comment="error object for GCIH allocation support">
++          (throwable() != Universe::_out_of_memory_error_gcih));
++          //</GCIH_ADD>
+ }
+ 
+ 
+@@ -926,7 +935,48 @@
+     return status;
+   }
+ 
++  //<GCIH_ADD comment="initialize GCIH right after the heap is initialized">
++  if (UseGCIH) {
++    jint gcih_status = GCInvisibleHeap::initialize();
++    if (gcih_status != JNI_OK) {
++      return gcih_status;
++    }
++  }
++  //</GCIH_ADD>
++
+ #ifdef _LP64
++  //<GCIH_ADD comment="check if GCIH conflicts with compressed oops">
++  if (UseCompressedOops && UseGCIH) {
++    uint64_t gcih_base  = (uint64_t) GCInvisibleHeap::reserved().start();
++    uint64_t gcih_end   = (uint64_t) GCInvisibleHeap::reserved().end();
++    uint64_t heap_base  = (uint64_t) Universe::heap()->base();
++    uint64_t heap_end   = (uint64_t) Universe::heap()->reserved_region().end();
++    
++    // Simply terminate the VM if there is a conflict.
++    // TODO Try to back off a level at a time instead.
++    if (gcih_end > heap_base && gcih_end - heap_base > OopEncodingHeapMax) {
++      vm_exit_during_initialization(
++        "GCIH size/location too large for Compressed Oops");
++    } else if (heap_end > OopEncodingHeapMax) { // HeapBasedNarrowOop
++      if (gcih_base < heap_base) {
++        vm_exit_during_initialization(
++          "GCIH start address too low for Compressed Oops with current heap");
++      }
++    } else {
++      if(heap_end > NarrowOopHeapMax) {         // ZeroBasedNarrowOop
++        if (gcih_end > OopEncodingHeapMax) {
++          vm_exit_during_initialization(
++            "GCIH end address too high for Compressed Oops with current heap");
++        }
++      } else {                                  // UnscaledNarrowOop
++        if (gcih_end > NarrowOopHeapMax) {
++          vm_exit_during_initialization(
++            "GCIH end address too high for Compressed Oops with current heap");
++        }
++      }
++    }
++  }
++  //</GCIH_ADD>
+   if (UseCompressedOops) {
+     // Subtract a page because something can get allocated at heap base.
+     // This also makes implicit null checking work, because the
+@@ -1044,6 +1094,9 @@
+     Universe::_out_of_memory_error_array_size = k_h->allocate_permanent_instance(CHECK_false);
+     Universe::_out_of_memory_error_gc_overhead_limit =
+       k_h->allocate_permanent_instance(CHECK_false);
++    //<GCIH_ADD comment="error object for GCIH allocation support">
++    Universe::_out_of_memory_error_gcih = k_h->allocate_permanent_instance(CHECK_false);
++    //</GCIH_ADD>
+ 
+     // Setup preallocated NullPointerException
+     // (this is currently used for a cheap & dirty solution in compiler exception handling)
+@@ -1078,6 +1131,11 @@
+ 
+     msg = java_lang_String::create_from_str("GC overhead limit exceeded", CHECK_false);
+     java_lang_Throwable::set_message(Universe::_out_of_memory_error_gc_overhead_limit, msg());
++    
++    //<GCIH_ADD comment="error object for GCIH allocation support">
++    msg = java_lang_String::create_from_str("GCIH full", CHECK_false);
++    java_lang_Throwable::set_message(Universe::_out_of_memory_error_gcih, msg());
++    //</GCIH_ADD>
+ 
+     msg = java_lang_String::create_from_str("/ by zero", CHECK_false);
+     java_lang_Throwable::set_message(Universe::_arithmetic_exception_instance, msg());
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/memory/universe.hpp
+--- a/src/share/vm/memory/universe.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/memory/universe.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -184,6 +184,9 @@
+   static oop          _out_of_memory_error_perm_gen;  // preallocated error object (no backtrace)
+   static oop          _out_of_memory_error_array_size;// preallocated error object (no backtrace)
+   static oop          _out_of_memory_error_gc_overhead_limit; // preallocated error object (no backtrace)
++  //<GCIH_ADD comment="error object for GCIH allocation support">
++  static oop          _out_of_memory_error_gcih; // preallocated error object (no backtrace)
++  //</GCIH_ADD>
+ 
+   // array of preallocated error objects with backtrace
+   static objArrayOop   _preallocated_out_of_memory_error_array;
+@@ -336,6 +339,9 @@
+   static oop out_of_memory_error_perm_gen()           { return gen_out_of_memory_error(_out_of_memory_error_perm_gen);   }
+   static oop out_of_memory_error_array_size()         { return gen_out_of_memory_error(_out_of_memory_error_array_size); }
+   static oop out_of_memory_error_gc_overhead_limit()  { return gen_out_of_memory_error(_out_of_memory_error_gc_overhead_limit);  }
++  //<GCIH_ADD comment="error object for GCIH allocation support">
++  static oop out_of_memory_error_gcih()               { return gen_out_of_memory_error(_out_of_memory_error_gcih);  }
++  //</GCIH_ADD>
+ 
+   // Accessors needed for fast allocation
+   static klassOop* boolArrayKlassObj_addr()           { return &_boolArrayKlassObj;   }
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/arguments.cpp
+--- a/src/share/vm/runtime/arguments.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/arguments.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -2881,6 +2881,25 @@
+   }
+ }
+ 
++//<GCIH_ADD comment="set GCIH flags">
++void Arguments::set_gcih_flags() {
++  // don't use GCIH if no base address is specified
++  if (GCIHBaseAddress == 0) {
++    warning("GCIHBaseAddress is not specified; UseGCIH is turned off.");
++    FLAG_SET_DEFAULT(UseGCIH, false);
++  }
++  if (TraceGCIH && FLAG_IS_DEFAULT(PrintGCIH)) {
++    FLAG_SET_CMDLINE(bool, PrintGCIH, true);
++  }
++  
++  //if (UseGCIH && !(UseConcMarkSweepGC && UseParNewGC)) {
++  if (UseGCIH && !UseConcMarkSweepGC) {
++    vm_exit_during_initialization(
++      "Incompatible GC arguments: UseGCIH must be used with UseConcMarkSweepGC && UseParNewGC");
++  }
++}
++//</GCIH_ADD>
++
+ // Parse entry point called from JNI_CreateJavaVM
+ 
+ jint Arguments::parse(const JavaVMInitArgs* args) {
+@@ -3038,6 +3057,12 @@
+ 
+   set_shared_spaces_flags();
+ 
++  //<GCIH_ADD comment="set implied GCIH flags">
++  if (UseGCIH) {
++    set_gcih_flags();
++  }
++  //</GCIH_ADD>
++
+   // Check the GC selections again.
+   if (!check_gc_consistency()) {
+     return JNI_EINVAL;
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/arguments.hpp
+--- a/src/share/vm/runtime/arguments.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/arguments.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -308,6 +308,9 @@
+   // GC ergonomics
+   static void set_ergonomics_flags();
+   static void set_shared_spaces_flags();
++  //<GCIH_ADD comment="GCIH flags">
++  static void set_gcih_flags();
++  //</GCIH_ADD>
+   // Setup heap size
+   static void set_heap_size();
+   // Based on automatic selection criteria, should the
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/globals.cpp
+--- a/src/share/vm/runtime/globals.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/globals.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -55,6 +55,8 @@
+                  MATERIALIZE_PRODUCT_FLAG, MATERIALIZE_PD_PRODUCT_FLAG, \
+                  MATERIALIZE_DIAGNOSTIC_FLAG, MATERIALIZE_NOTPRODUCT_FLAG)
+ 
++MATERIALIZE_FLAGS_EXT
++
+ bool Flag::is_unlocker() const {
+   return strcmp(name, "UnlockDiagnosticVMOptions") == 0     ||
+          strcmp(name, "UnlockExperimentalVMOptions") == 0;
+@@ -235,6 +237,7 @@
+ #ifdef SHARK
+  SHARK_FLAGS(SHARK_DEVELOP_FLAG_STRUCT, SHARK_PD_DEVELOP_FLAG_STRUCT, SHARK_PRODUCT_FLAG_STRUCT, SHARK_PD_PRODUCT_FLAG_STRUCT, SHARK_DIAGNOSTIC_FLAG_STRUCT, SHARK_NOTPRODUCT_FLAG_STRUCT)
+ #endif
++ FLAGTABLE_EXT
+  {0, NULL, NULL}
+ };
+ 
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/globals.hpp
+--- a/src/share/vm/runtime/globals.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/globals.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -207,6 +207,9 @@
+   bool is_writeable() const;
+   bool is_external() const;
+ 
++  bool is_unlocker_ext() const;
++  bool is_unlocked_ext() const;
++
+   void print_on(outputStream* st, bool withComments = false );
+   void print_as_flag(outputStream* st);
+ };
+@@ -3752,4 +3755,8 @@
+ 
+ RUNTIME_OS_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG, DECLARE_PRODUCT_FLAG, DECLARE_PD_PRODUCT_FLAG, DECLARE_DIAGNOSTIC_FLAG, DECLARE_NOTPRODUCT_FLAG)
+ 
++// Extensions
++
++#include "runtime/globals_ext.hpp"
++
+ #endif // SHARE_VM_RUNTIME_GLOBALS_HPP
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/globals_ext.hpp
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/share/vm/runtime/globals_ext.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -0,0 +1,120 @@
++/*
++ * Copyright (c) 2011 Oracle and/or its affiliates. All rights reserved.
++ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
++ *
++ * This code is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License version 2 only, as
++ * published by the Free Software Foundation.
++ *
++ * This code is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
++ * version 2 for more details (a copy is included in the LICENSE file that
++ * accompanied this code).
++ *
++ * You should have received a copy of the GNU General Public License version
++ * 2 along with this work; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
++ * or visit www.oracle.com if you need additional information or have any
++ * questions.
++ *
++ */
++
++#ifndef SHARE_VM_RUNTIME_GLOBALS_EXT_HPP
++#define SHARE_VM_RUNTIME_GLOBALS_EXT_HPP
++
++// Taobao-specific globals.hpp extension
++
++#define TAOBAO_FLAGS(develop, develop_pd, product, product_pd, diagnostic, experimental, notproduct, manageable, product_rw, lp64_product) \
++  product(intx, ArrayAllocationWarningSize, 512*M,                          \
++          "array allocation with size larger than this (bytes) will be "    \
++          "given a warning")                                                \
++  manageable(bool, PrintGCReason, false,                                    \
++          "Print the reason of triggering a garbage collection cycle")      \
++  manageable(bool, PrintMoveOutOopInfo, false,                              \
++          "Print the moveouted oop information to analyse system cache")    \
++  product(bool, UseTaobaoPatchJAR, true,                                    \
++          "Insert Taobao-specific patch JAR into bootclasspath")            \
++  product(uintx, StealingFailureThreshold, 10,                              \
++          "Threshold of unsuccessful stealing, a gc thread will stop"       \
++          "stealing tasks when it has failed this many times")              \
++                                                                            \
++  /* GCIH */                                                                \
++                                                                            \
++  product(bool, UseGCIH, false,                                             \
++          "use GC Invisible Heap")                                          \
++  product(bool, CheckGCIH, false,                                           \
++          "check oop in gcih whether it has outer references")              \
++  product(uintx, GCIHBaseAddress, 0,                                        \
++          "preferred base address of GCIH")                                 \
++  product(uintx, GCIHSize, ScaleForWordSize(256*M),                         \
++          "total size of both of GCIH semispaces")                          \
++  product(bool, VerifyGCIH, false,                                          \
++          "perform extra checks during GCIH move in")                       \
++  product(bool, PrintGCIH, false,                                           \
++          "print messages at GCIH move-in and move-out")                    \
++  product(bool, TraceGCIH, false,                                           \
++          "trace actions of GCIH")
++// add new Taobao-specific VM flags here
++
++TAOBAO_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG,
++             DECLARE_PRODUCT_FLAG, DECLARE_PD_PRODUCT_FLAG,
++             DECLARE_DIAGNOSTIC_FLAG, DECLARE_EXPERIMENTAL_FLAG,
++             DECLARE_NOTPRODUCT_FLAG, DECLARE_MANAGEABLE_FLAG,
++             DECLARE_PRODUCT_RW_FLAG, DECLARE_LP64_PRODUCT_FLAG)
++
++// globals_extension.hpp extension
++
++// Additional CommandLineFlags enum values
++#define COMMANDLINEFLAG_EXT                                                    \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_MEMBER, RUNTIME_PD_DEVELOP_FLAG_MEMBER,      \
++             RUNTIME_PRODUCT_FLAG_MEMBER, RUNTIME_PD_PRODUCT_FLAG_MEMBER,      \
++             RUNTIME_DIAGNOSTIC_FLAG_MEMBER, RUNTIME_EXPERIMENTAL_FLAG_MEMBER, \
++             RUNTIME_NOTPRODUCT_FLAG_MEMBER, RUNTIME_MANAGEABLE_FLAG_MEMBER,   \
++             RUNTIME_PRODUCT_RW_FLAG_MEMBER, RUNTIME_LP64_PRODUCT_FLAG_MEMBER)
++
++// Additional CommandLineFlagsWithType enum values
++#define COMMANDLINEFLAGWITHTYPE_EXT                      \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_MEMBER_WITH_TYPE,      \
++             RUNTIME_PD_DEVELOP_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_PRODUCT_FLAG_MEMBER_WITH_TYPE,      \
++             RUNTIME_PD_PRODUCT_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_DIAGNOSTIC_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_EXPERIMENTAL_FLAG_MEMBER_WITH_TYPE, \
++             RUNTIME_NOTPRODUCT_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_MANAGEABLE_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_PRODUCT_RW_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_LP64_PRODUCT_FLAG_MEMBER_WITH_TYPE)
++
++// globals.cpp extension
++
++// Additional flag definitions
++#define MATERIALIZE_FLAGS_EXT                                            \
++TAOBAO_FLAGS(MATERIALIZE_DEVELOPER_FLAG, MATERIALIZE_PD_DEVELOPER_FLAG,  \
++             MATERIALIZE_PRODUCT_FLAG, MATERIALIZE_PD_PRODUCT_FLAG,      \
++             MATERIALIZE_DIAGNOSTIC_FLAG, MATERIALIZE_EXPERIMENTAL_FLAG, \
++             MATERIALIZE_NOTPRODUCT_FLAG,                                \
++             MATERIALIZE_MANAGEABLE_FLAG, MATERIALIZE_PRODUCT_RW_FLAG,   \
++             MATERIALIZE_LP64_PRODUCT_FLAG)
++
++// Additional flag descriptors: see flagTable definition
++#define FLAGTABLE_EXT                                                          \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_STRUCT, RUNTIME_PD_DEVELOP_FLAG_STRUCT,      \
++             RUNTIME_PRODUCT_FLAG_STRUCT, RUNTIME_PD_PRODUCT_FLAG_STRUCT,      \
++             RUNTIME_DIAGNOSTIC_FLAG_STRUCT, RUNTIME_EXPERIMENTAL_FLAG_STRUCT, \
++             RUNTIME_NOTPRODUCT_FLAG_STRUCT, RUNTIME_MANAGEABLE_FLAG_STRUCT,   \
++             RUNTIME_PRODUCT_RW_FLAG_STRUCT, RUNTIME_LP64_PRODUCT_FLAG_STRUCT)
++
++// Default method implementations
++
++inline bool Flag::is_unlocker_ext() const {
++  return false;
++}
++
++inline bool Flag::is_unlocked_ext() const {
++  return true;
++}
++
++#endif // SHARE_VM_RUNTIME_GLOBALS_EXT_HPP
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/globals_extension.hpp
+--- a/src/share/vm/runtime/globals_extension.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/globals_extension.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -93,6 +93,7 @@
+ #ifdef COMPILER2
+  C2_FLAGS(C2_DEVELOP_FLAG_MEMBER, C2_PD_DEVELOP_FLAG_MEMBER, C2_PRODUCT_FLAG_MEMBER, C2_PD_PRODUCT_FLAG_MEMBER, C2_DIAGNOSTIC_FLAG_MEMBER, C2_EXPERIMENTAL_FLAG_MEMBER, C2_NOTPRODUCT_FLAG_MEMBER)
+ #endif
++ COMMANDLINEFLAG_EXT
+  NUM_CommandLineFlag
+ } CommandLineFlag;
+ 
+@@ -192,6 +193,7 @@
+           C2_EXPERIMENTAL_FLAG_MEMBER_WITH_TYPE,
+           C2_NOTPRODUCT_FLAG_MEMBER_WITH_TYPE)
+ #endif
++ COMMANDLINEFLAGWITHTYPE_EXT
+  NUM_CommandLineFlagWithType
+ } CommandLineFlagWithType;
+ 
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/runtime/vm_operations.hpp
+--- a/src/share/vm/runtime/vm_operations.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/runtime/vm_operations.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -93,6 +93,8 @@
+   template(HeapIterateOperation)                  \
+   template(ReportJavaOutOfMemory)                 \
+   template(Exit)                                  \
++  template(OopCheck)                              \
++  template(AdjustOopAddress)                      \
+ 
+ class VM_Operation: public CHeapObj {
+  public:
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/utilities/taskqueue.cpp
+--- a/src/share/vm/utilities/taskqueue.cpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/utilities/taskqueue.cpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -255,6 +255,10 @@
+ }
+ #endif
+ 
++void ParallelTaskTerminator::inc_offered_termination() {
++  Atomic::inc(&_offered_termination);
++}
++
+ void ParallelTaskTerminator::reset_for_reuse() {
+   if (_offered_termination != 0) {
+     assert(_offered_termination == _n_threads,
+diff -r f0f676c5a2c6 -r 0724adf82b5c src/share/vm/utilities/taskqueue.hpp
+--- a/src/share/vm/utilities/taskqueue.hpp	Tue Mar 15 19:30:16 2011 -0700
++++ b/src/share/vm/utilities/taskqueue.hpp	Wed Nov 07 09:31:45 2012 +0800
+@@ -635,6 +635,8 @@
+   // method of the terminator parameter returns true. If terminator is
+   // NULL, then it is ignored.
+   bool offer_termination(TerminatorTerminator* terminator);
++  
++  void inc_offered_termination();
+ 
+   // Reset the terminator, so that it may be reused again.
+   // The caller is responsible for ensuring that this is done

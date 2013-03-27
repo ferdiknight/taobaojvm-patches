@@ -1,0 +1,67 @@
+diff -r 899e8d8df579 src/share/vm/runtime/globals_ext.hpp
+--- a/src/share/vm/runtime/globals_ext.hpp	Mon Dec 05 12:50:00 2011 -0500
++++ b/src/share/vm/runtime/globals_ext.hpp	Fri Dec 16 11:00:32 2011 +0800
+@@ -25,23 +25,58 @@
+ #ifndef SHARE_VM_RUNTIME_GLOBALS_EXT_HPP
+ #define SHARE_VM_RUNTIME_GLOBALS_EXT_HPP
+ 
++// Taobao-specific globals.hpp extension
++
++#define TAOBAO_FLAGS(develop, develop_pd, product, product_pd, diagnostic, experimental, notproduct, manageable, product_rw, lp64_product) \
++// add new Taobao-specific VM flags here
++
++TAOBAO_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG,
++             DECLARE_PRODUCT_FLAG, DECLARE_PD_PRODUCT_FLAG,
++             DECLARE_DIAGNOSTIC_FLAG, DECLARE_EXPERIMENTAL_FLAG,
++             DECLARE_NOTPRODUCT_FLAG, DECLARE_MANAGEABLE_FLAG,
++             DECLARE_PRODUCT_RW_FLAG, DECLARE_LP64_PRODUCT_FLAG)
++
+ // globals_extension.hpp extension
+ 
+ // Additional CommandLineFlags enum values
+-#define COMMANDLINEFLAG_EXT
++#define COMMANDLINEFLAG_EXT                                                    \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_MEMBER, RUNTIME_PD_DEVELOP_FLAG_MEMBER,      \
++             RUNTIME_PRODUCT_FLAG_MEMBER, RUNTIME_PD_PRODUCT_FLAG_MEMBER,      \
++             RUNTIME_DIAGNOSTIC_FLAG_MEMBER, RUNTIME_EXPERIMENTAL_FLAG_MEMBER, \
++             RUNTIME_NOTPRODUCT_FLAG_MEMBER, RUNTIME_MANAGEABLE_FLAG_MEMBER,   \
++             RUNTIME_PRODUCT_RW_FLAG_MEMBER, RUNTIME_LP64_PRODUCT_FLAG_MEMBER)
+ 
+ // Additional CommandLineFlagsWithType enum values
+-#define COMMANDLINEFLAGWITHTYPE_EXT
+-
++#define COMMANDLINEFLAGWITHTYPE_EXT                      \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_MEMBER_WITH_TYPE,      \
++             RUNTIME_PD_DEVELOP_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_PRODUCT_FLAG_MEMBER_WITH_TYPE,      \
++             RUNTIME_PD_PRODUCT_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_DIAGNOSTIC_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_EXPERIMENTAL_FLAG_MEMBER_WITH_TYPE, \
++             RUNTIME_NOTPRODUCT_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_MANAGEABLE_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_PRODUCT_RW_FLAG_MEMBER_WITH_TYPE,   \
++             RUNTIME_LP64_PRODUCT_FLAG_MEMBER_WITH_TYPE)
+ 
+ // globals.cpp extension
+ 
+ // Additional flag definitions
+-#define MATERIALIZE_FLAGS_EXT
++#define MATERIALIZE_FLAGS_EXT                                            \
++TAOBAO_FLAGS(MATERIALIZE_DEVELOPER_FLAG, MATERIALIZE_PD_DEVELOPER_FLAG,  \
++             MATERIALIZE_PRODUCT_FLAG, MATERIALIZE_PD_PRODUCT_FLAG,      \
++             MATERIALIZE_DIAGNOSTIC_FLAG, MATERIALIZE_EXPERIMENTAL_FLAG, \
++             MATERIALIZE_NOTPRODUCT_FLAG,                                \
++             MATERIALIZE_MANAGEABLE_FLAG, MATERIALIZE_PRODUCT_RW_FLAG,   \
++             MATERIALIZE_LP64_PRODUCT_FLAG)
+ 
+ // Additional flag descriptors: see flagTable definition
+-#define FLAGTABLE_EXT
+-
++#define FLAGTABLE_EXT                                                          \
++TAOBAO_FLAGS(RUNTIME_DEVELOP_FLAG_STRUCT, RUNTIME_PD_DEVELOP_FLAG_STRUCT,      \
++             RUNTIME_PRODUCT_FLAG_STRUCT, RUNTIME_PD_PRODUCT_FLAG_STRUCT,      \
++             RUNTIME_DIAGNOSTIC_FLAG_STRUCT, RUNTIME_EXPERIMENTAL_FLAG_STRUCT, \
++             RUNTIME_NOTPRODUCT_FLAG_STRUCT, RUNTIME_MANAGEABLE_FLAG_STRUCT,   \
++             RUNTIME_PRODUCT_RW_FLAG_STRUCT, RUNTIME_LP64_PRODUCT_FLAG_STRUCT)
+ 
+ // Default method implementations

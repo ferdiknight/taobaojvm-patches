@@ -1,0 +1,12 @@
+diff -r 899e8d8df579 src/share/vm/runtime/globals.hpp
+--- a/src/share/vm/runtime/globals.hpp	Mon Dec 05 12:50:00 2011 -0500
++++ b/src/share/vm/runtime/globals.hpp	Fri Dec 16 11:21:23 2011 +0800
+@@ -2287,7 +2287,7 @@
+   develop(bool, IgnoreLibthreadGPFault, false,                              \
+           "Suppress workaround for libthread GP fault")                     \
+                                                                             \
+-  product(bool, PrintJNIGCStalls, false,                                    \
++  manageable(bool, PrintJNIGCStalls, false,                                 \
+           "Print diagnostic message when GC is stalled"                     \
+           "by JNI critical section")                                        \
+                                                                             \

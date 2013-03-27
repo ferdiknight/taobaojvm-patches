@@ -1,0 +1,105 @@
+diff -r 883328bfc472 src/cpu/x86/vm/sharedRuntime_x86_32.cpp
+--- a/src/cpu/x86/vm/sharedRuntime_x86_32.cpp	Thu Nov 17 10:45:53 2011 -0800
++++ b/src/cpu/x86/vm/sharedRuntime_x86_32.cpp	Mon Nov 21 00:14:06 2011 +0800
+@@ -1291,23 +1291,18 @@
+ 
+   const Register ic_reg = rax;
+   const Register receiver = rcx;
+-  Label hit;
++
+   Label exception_pending;
+ 
+-
+   __ verify_oop(receiver);
+   __ cmpptr(ic_reg, Address(receiver, oopDesc::klass_offset_in_bytes()));
+-  __ jcc(Assembler::equal, hit);
+-
+-  __ jump(RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
++  __ jump_cc(Assembler::notEqual, RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
+ 
+   // verified entry must be aligned for code patching.
+   // and the first 5 bytes must be in the same cache line
+   // if we align at 8 then we will be sure 5 bytes are in the same line
+   __ align(8);
+ 
+-  __ bind(hit);
+-
+   int vep_offset = ((intptr_t)__ pc()) - start;
+ 
+ #ifdef COMPILER1
+@@ -1656,33 +1651,15 @@
+   }
+ 
+   // check for safepoint operation in progress and/or pending suspend requests
+-  { Label Continue;
++  Label change_thread_state;
++  Label check_native_trans;
++  __ cmp32(ExternalAddress((address)SafepointSynchronize::address_of_state()),
++             SafepointSynchronize::_not_synchronized);
++  __ jcc(Assembler::notEqual, check_native_trans);
++  __ cmpl(Address(thread, JavaThread::suspend_flags_offset()), 0);
++  __ jcc(Assembler::notEqual, check_native_trans);
+ 
+-    __ cmp32(ExternalAddress((address)SafepointSynchronize::address_of_state()),
+-             SafepointSynchronize::_not_synchronized);
+-
+-    Label L;
+-    __ jcc(Assembler::notEqual, L);
+-    __ cmpl(Address(thread, JavaThread::suspend_flags_offset()), 0);
+-    __ jcc(Assembler::equal, Continue);
+-    __ bind(L);
+-
+-    // Don't use call_VM as it will see a possible pending exception and forward it
+-    // and never return here preventing us from clearing _last_native_pc down below.
+-    // Also can't use call_VM_leaf either as it will check to see if rsi & rdi are
+-    // preserved and correspond to the bcp/locals pointers. So we do a runtime call
+-    // by hand.
+-    //
+-    save_native_result(masm, ret_type, stack_slots);
+-    __ push(thread);
+-    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address,
+-                                            JavaThread::check_special_condition_for_native_trans)));
+-    __ increment(rsp, wordSize);
+-    // Restore any method result value
+-    restore_native_result(masm, ret_type, stack_slots);
+-
+-    __ bind(Continue);
+-  }
++  __ bind(change_thread_state);
+ 
+   // change thread state
+   __ movl(Address(thread, JavaThread::thread_state_offset()), _thread_in_Java);
+@@ -1811,6 +1788,26 @@
+ 
+   // Unexpected paths are out of line and go here
+ 
++  // SLOW PATH Check special condition for native transition
++  {
++    __ bind(check_native_trans);
++
++    // Don't use call_VM as it will see a possible pending exception and forward it
++    // and never return here preventing us from clearing _last_native_pc down below.
++    // Also can't use call_VM_leaf either as it will check to see if rsi & rdi are
++    // preserved and correspond to the bcp/locals pointers. So we do a runtime call
++    // by hand.
++    //
++    save_native_result(masm, ret_type, stack_slots);
++    __ push(thread);
++    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address,
++                                            JavaThread::check_special_condition_for_native_trans)));
++    __ increment(rsp, wordSize);
++    // Restore any method result value
++    restore_native_result(masm, ret_type, stack_slots);
++    __ jmp(change_thread_state);
++  }
++
+   // Slow path locking & unlocking
+   if (method->is_synchronized()) {
+ 
+@@ -1893,7 +1890,7 @@
+ 
+   // BEGIN EXCEPTION PROCESSING
+ 
+-  // Forward  the exception
++  // Forward the exception
+   __ bind(exception_pending);

@@ -1,0 +1,97 @@
+diff -r d45dfcad52ba src/share/vm/memory/cardTableModRefBS.cpp
+--- a/src/share/vm/memory/cardTableModRefBS.cpp Fri Apr 13 00:59:56 2012 +0800
++++ b/src/share/vm/memory/cardTableModRefBS.cpp Tue Sep 11 17:09:56 2012 +0800
+@@ -523,8 +523,19 @@
+             }
+           }
+           cl->do_MemRegion(dirty_region);
++          cur_entry = next_entry;
++        } else {
++          // fast forward through potential continuous whole-word range of clean cards beginning at a word-boundary
++          if (is_word_aligned(cur_entry)) {
++            jbyte* cur_row = cur_entry - BytesPerWord;
++            while (cur_row >= limit && *((intptr_t*)cur_row) == CardTableModRefBS::clean_card_row()) {
++              cur_row -= BytesPerWord;
++            }
++            cur_entry = cur_row + BytesPerWord - 1;
++          } else {
++            cur_entry = next_entry;
++          }
+         }
+-        cur_entry = next_entry;
+       }
+     }
+   }
+diff -r d45dfcad52ba src/share/vm/memory/cardTableModRefBS.hpp
+--- a/src/share/vm/memory/cardTableModRefBS.hpp Fri Apr 13 00:59:56 2012 +0800
++++ b/src/share/vm/memory/cardTableModRefBS.hpp Tue Sep 11 17:09:56 2012 +0800
+@@ -71,6 +71,19 @@
+     CT_MR_BS_last_reserved      = 16
+   };
+
++
++  // a word's worth (row) of clean card values
++  static const intptr_t _clean_card_row = (intptr_t)(-1);
++
++  // check alignment of pointer
++  bool is_word_aligned(jbyte* entry) {
++    return (((intptr_t)entry) & (BytesPerWord-1)) == 0;
++  }
++
++  static intptr_t clean_card_row() {
++    return CardTableModRefBS::_clean_card_row;
++  }
++
+   // dirty and precleaned are equivalent wrt younger_refs_iter.
+   static bool card_is_dirty_wrt_gen_iter(jbyte cv) {
+     return cv == dirty_card || cv == precleaned_card;
+@@ -192,13 +205,6 @@
+   // all of which must be covered.)
+   void clear_MemRegion(MemRegion mr);
+
+-  // *** Support for parallel card scanning.
+-
+-  enum SomeConstantsForParallelism {
+-    StridesPerThread    = 2,
+-    CardsPerStrideChunk = 256
+-  };
+-
+   // This is an array, one element per covered region of the card table.
+   // Each entry is itself an array, with one element per chunk in the
+   // covered region.  Each entry of these arrays is the lowest non-clean
+@@ -231,7 +237,7 @@
+   // covers the given address.
+   uintptr_t addr_to_chunk_index(const void* addr) {
+     uintptr_t card = (uintptr_t) byte_for(addr);
+-    return card / CardsPerStrideChunk;
++    return card / ParGCCardsPerStrideChunk;
+   }
+
+   // Apply cl, which must either itself apply dcto_cl or be dcto_cl,
+@@ -477,7 +483,7 @@
+   void verify_dirty_region(MemRegion mr) PRODUCT_RETURN;
+
+   static size_t par_chunk_heapword_alignment() {
+-    return CardsPerStrideChunk * card_size_in_words;
++    return ParGCCardsPerStrideChunk * card_size_in_words;
+   }
+
+ };
+diff -r d45dfcad52ba src/share/vm/runtime/globals_ext.hpp
+--- a/src/share/vm/runtime/globals_ext.hpp      Fri
+ Apr 13 00:59:56 2012 +0800
++++ b/src/share/vm/runtime/globals_ext.hpp      Tue Sep 11 17:09:56 2012 +0800
+@@ -45,7 +45,13 @@
+           "  0: no tracing at all;"                                         \
+           "  1: record Unsafe allocs in a jvmstat counter;"                 \
+           "  2: print short logs on alloc/free;"                            \
+-          "  3: print verbose logs on alloc/free")
++          "  3: print verbose logs on alloc/free")                          \
++   product(intx, ParGCStridesPerThread, 2,                                  \
++           "The number of strides per worker thread that we divide up the " \
++           "card table scanning work into")                                 \
++   product(intx, ParGCCardsPerStrideChunk, 256,                             \
++           "The number of cards in each chunk of the parallel chunks used " \
++           "during card table scanning")
+ // add new Taobao-specific VM flags here
+

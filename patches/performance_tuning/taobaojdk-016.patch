@@ -1,0 +1,354 @@
+diff --git a/src/cpu/x86/vm/sharedRuntime_x86_64.cpp b/src/cpu/x86/vm/sharedRuntime_x86_64.cpp
+--- a/src/cpu/x86/vm/sharedRuntime_x86_64.cpp
++++ b/src/cpu/x86/vm/sharedRuntime_x86_64.cpp
+@@ -34,6 +34,7 @@
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/vframeArray.hpp"
+ #include "vmreg_x86.inline.hpp"
++#include "taobao/taobao.h"
+ #ifdef COMPILER1
+ #include "c1/c1_Runtime1.hpp"
+ #endif
+@@ -3345,3 +3346,185 @@
+   _exception_blob =  ExceptionBlob::create(&buffer, oop_maps, SimpleRuntimeFrame::framesize >> 1);
+ }
+ #endif // COMPILER2
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++/*
++ * Class:     com_taobao_java_util_crc_taobaoCrc32
++ * Method:    updateBytes
++ * Signature: (I[BII)I
++ */
++jint JNICALL Java_com_taobao_java_util_crc_taobaoCrc32_updateBytes
++  (JNIEnv * env, jclass jcls, jint crc, jbyteArray array, jint off, jint len) {
++    taobao32u value = (taobao32u)crc;
++    taobao8u *buf = (taobao8u *)(env->GetPrimitiveArrayCritical(array, 0));
++
++    taobaosCRC32_8u(buf + off, len, &value);
++
++    env->ReleasePrimitiveArrayCritical(array, buf, 0);
++    return value;
++}
++
++/*
++ * Class:     com_taobao_java_util_crc_taobaoCrc32C
++ * Method:    updateBytes
++ * Signature: (I[BII)I
++ */
++jint JNICALL Java_com_taobao_java_util_crc_taobaoCrc32C_updateBytes
++  (JNIEnv * env, jclass jcls, jint crc, jbyteArray array, jint off, jint len) {
++    taobao32u value = (taobao32u)crc;
++    taobao8u *buf = (taobao8u *)(env->GetPrimitiveArrayCritical(array, 0));
++
++    taobaosCRC32C_8u(buf + off, len, &value);
++
++    env->ReleasePrimitiveArrayCritical(array, buf, 0);
++    return value;
++}
++
++DEBUG_ONLY(
++/*
++ * Class:     com_taobao_java_util_crc_taobaoCrc32CJNI
++ * Method:    updateBytes
++ * Signature: (I[BII)I
++ */
++jint JNICALL Java_com_taobao_java_util_crc_taobaoCrc32CJNI_updateBytes
++  (JNIEnv * env, jclass jcls, jint crc, jbyteArray array, jint off, jint len) {
++    taobao32u value = (taobao32u)crc;
++    taobao8u *buf = (taobao8u *)(env->GetPrimitiveArrayCritical(array, 0));
++
++    taobaosCRC32C_8u(buf + off, len, &value);
++
++    env->ReleasePrimitiveArrayCritical(array, buf, 0);
++    return value;
++}
++)
++#ifdef __cplusplus
++}
++#endif
++
++static JNINativeMethod taobaocrc32_methods[] = {
++  { "updateBytes", "(I[BII)I", (void *) &Java_com_taobao_java_util_crc_taobaoCrc32_updateBytes }
++};
++
++static JNINativeMethod taobaocrc32c_methods[] = {
++  { "updateBytes", "(I[BII)I", (void *) &Java_com_taobao_java_util_crc_taobaoCrc32C_updateBytes }
++};
++
++#ifdef ASSERT
++static JNINativeMethod taobaocrc32cjni_methods[] = {
++  { "updateBytes", "(I[BII)I", (void *) &Java_com_taobao_java_util_crc_taobaoCrc32CJNI_updateBytes }
++};
++#endif
++
++JVM_ENTRY(void, JVM_RegistertaobaoCrc32Methods(JNIEnv *env, jclass taobaocrc32cls))
++{
++  ThreadToNativeFromVM ttnfv(thread);
++
++  env->RegisterNatives(taobaocrc32cls, taobaocrc32_methods, sizeof(taobaocrc32_methods)/sizeof(JNINativeMethod));
++  if (env->ExceptionOccurred()) {
++    if (PrintMiscellaneous && (Verbose || WizardMode)) {
++      tty->print_cr("Warning:  crc32 not found.");
++    }
++    env->ExceptionClear();
++  }
++}
++JVM_END
++
++JVM_ENTRY(void, JVM_RegistertaobaoCrc32CMethods(JNIEnv *env, jclass taobaocrc32ccls))
++{
++  ThreadToNativeFromVM ttnfv(thread);
++
++  env->RegisterNatives(taobaocrc32ccls, taobaocrc32c_methods, sizeof(taobaocrc32c_methods)/sizeof(JNINativeMethod));
++  if (env->ExceptionOccurred()) {
++    if (PrintMiscellaneous && (Verbose || WizardMode)) {
++      tty->print_cr("Warning:  crc32c not found.");
++    }
++    env->ExceptionClear();
++  }
++}
++JVM_END
++
++DEBUG_ONLY(
++JVM_ENTRY(void, JVM_RegistertaobaoCrc32CJNIMethods(JNIEnv *env, jclass taobaocrc32cjnicls))
++{
++  ThreadToNativeFromVM ttnfv(thread);
++
++  env->RegisterNatives(taobaocrc32cjnicls, taobaocrc32cjni_methods, sizeof(taobaocrc32cjni_methods)/sizeof(JNINativeMethod));
++  if (env->ExceptionOccurred()) {
++    if (PrintMiscellaneous && (Verbose || WizardMode)) {
++      tty->print_cr("Warning:  crc32cjni not found.");
++    }
++    env->ExceptionClear();
++  }
++}
++JVM_END
++)
++
++extern "C" {
++  int link_to_taobao;
++}
++struct taobao_STATIC_INIT {
++  int tmp;
++  taobao_STATIC_INIT(int tmp_init){this->tmp = tmp_init; taobaoStaticInit();}
++};
++taobao_STATIC_INIT taobao_X(link_to_taobao);
++
++int taobaoCRC32(int crc, typeArrayOop buf, int off, int len) {
++  unsigned int v32 = crc;
++  taobaosCRC32_8u((taobao8u *)(buf->byte_at_addr(off)), len, &v32);
++  return v32;
++}
++
++int taobaoCRC32C(int crc, typeArrayOop buf, int off, int len) {
++  unsigned int v32 = crc;
++  if(UseSSE42Intrinsics) {
++    if (len == 1) {
++      unsigned char* p8 = (unsigned char*)(buf->byte_at_addr(off));
++      asm volatile("crc32b %1,%0":"+r"(v32):"m"(*p8));
++      return v32;
++    }
++    if (len == 2) {
++      unsigned short* p16 = (unsigned short*)(buf->byte_at_addr(off));
++      asm volatile("crc32w %1,%0":"+r"(v32):"m"(*p16));
++      return v32;
++    }
++    if (len == 4) {
++      unsigned int* p32 = (unsigned int*)(buf->byte_at_addr(off));
++      asm volatile("crc32l %1,%0":"+r"(v32):"m"(*p32));
++      return v32;
++    }
++    if (len <= 256 ) {
++      unsigned long long v64 = crc;
++      unsigned long long* p64= (unsigned long long*)(buf->byte_at_addr(off));
++      int num = len >> 3;
++      int i;
++      for (i = 0; i < num; i++) {
++        asm volatile("crc32q %1,%0":"+r"(v64):"m"(p64[i]));
++      }
++      v32 = v64;
++      num = len - (num << 3);
++      if (num) {
++        char* p8 = (char*)(&(p64[i]));
++        if (num >= 4) {
++          unsigned int* p32 = (unsigned int *)p8;
++          asm volatile("crc32l %1,%0":"+r"(v32):"m"(*p32));
++          num -= 4;
++          p8 += 4;
++        }
++        if (num >= 2) {
++          unsigned short* p16 = (unsigned short *)p8;
++          asm volatile("crc32w %1,%0":"+r"(v32):"m"(*p16));
++          num -= 2;
++          p8 += 2;
++        }
++        if (num) {
++          asm volatile("crc32b %1,%0":"+r"(v32):"m"(*p8));
++        }
++      }
++      return v32;
++    }
++  }
++  taobaosCRC32C_8u((taobao8u *)(buf->byte_at_addr(off)), len, &v32);
++  return v32;
++}
+diff --git a/src/share/vm/classfile/vmSymbols.hpp b/src/share/vm/classfile/vmSymbols.hpp
+--- a/src/share/vm/classfile/vmSymbols.hpp
++++ b/src/share/vm/classfile/vmSymbols.hpp
+@@ -556,6 +556,14 @@
+   do_intrinsic(_clone,                    java_lang_Object,       clone_name, void_object_signature,             F_R)   \
+    do_name(     clone_name,                                      "clone")                                               \
+                                                                                                                         \
++  /* taobao crc intrinsics definition */                                                                                   \
++  do_signature(crc_signature,             "(I[BII)I")                                                                   \
++  do_name(updateBytes_name, "updateBytes")                                                                              \
++  do_class(com_taobao_java_util_crc_taobaoCrc32, "com/taobao/java/util/crc/TCrc32")                                        \
++  do_class(com_taobao_java_util_crc_taobaoCrc32C,"com/taobao/java/util/crc/TCrc32C")                                       \
++  do_intrinsic(_crc32,                    com_taobao_java_util_crc_taobaoCrc32, updateBytes_name,  crc_signature,   F_SN)  \
++  do_intrinsic(_crc32c,                   com_taobao_java_util_crc_taobaoCrc32C,updateBytes_name,  crc_signature,   F_SN)  \
++                                                                                                                        \
+   /* Math & StrictMath intrinsics are defined in terms of just a few signatures: */                                     \
+   do_class(java_lang_Math,                "java/lang/Math")                                                             \
+   do_class(java_lang_StrictMath,          "java/lang/StrictMath")                                                       \
+diff --git a/src/share/vm/opto/library_call.cpp b/src/share/vm/opto/library_call.cpp
+--- a/src/share/vm/opto/library_call.cpp
++++ b/src/share/vm/opto/library_call.cpp
+@@ -188,7 +188,9 @@
+   // Helper function for inlining native object hash method
+   bool inline_native_hashcode(bool is_virtual, bool is_static);
+   bool inline_native_getClass();
+-
++  // taobao crc
++  bool inline_crc32();
++  bool inline_crc32c();
+   // Helper functions for inlining arraycopy
+   bool inline_arraycopy();
+   void generate_arraycopy(const TypePtr* adr_type,
+@@ -660,6 +662,11 @@
+ 
+   case vmIntrinsics::_getCallerClass:
+     return inline_native_Reflection_getCallerClass();
++  
++  case vmIntrinsics::_crc32:
++    return inline_crc32();
++  case vmIntrinsics::_crc32c:
++    return inline_crc32c();
+ 
+   default:
+     // If you get here, it may be that someone has added a new intrinsic
+@@ -3595,6 +3602,69 @@
+   return true;
+ }
+ 
++//---------------------------------inline taobao crc------------------------------
++bool LibraryCallKit::inline_crc32() {
++  const char * funcName = "taobaoCRC32";
++  address funcAddr = CAST_FROM_FN_PTR(address, taobaoCRC32);
++  
++  // create input type (domain)
++  const Type **fields = TypeTuple::fields(4);
++  fields[TypeFunc::Parms+0] = TypeInt::INT;
++  fields[TypeFunc::Parms+1] = TypePtr::NOTNULL;
++  fields[TypeFunc::Parms+2] = TypeInt::INT;
++  fields[TypeFunc::Parms+3] = TypeInt::INT;
++  
++  const TypeTuple *domain = TypeTuple::make(TypeFunc::Parms+4, fields);
++  
++  // create result type (range)
++  fields = TypeTuple::fields(1);
++  fields[TypeFunc::Parms+0] = TypeInt::INT;
++  const TypeTuple *range = TypeTuple::make(TypeFunc::Parms+1, fields);
++  const TypeFunc *tf = TypeFunc::make(domain, range);
++  
++  const TypePtr* no_memory_effects = NULL;
++  
++  Node* crc = argument(0);
++  Node* buf = argument(1);
++  Node* off = argument(2);
++  Node* len = argument(3);
++  Node* call = make_runtime_call(RC_LEAF, tf, funcAddr, funcName, no_memory_effects, crc, buf, off, len);
++  Node* value = _gvn.transform(new (C, 1) ProjNode(call, TypeFunc::Parms+0));
++  push(value);
++  return true;
++}
++
++bool LibraryCallKit::inline_crc32c() {
++  const char * funcName = "taobaoCRC32C";
++  address funcAddr = CAST_FROM_FN_PTR(address, taobaoCRC32C);
++  
++  // create input type (domain)
++  const Type **fields = TypeTuple::fields(4);
++  fields[TypeFunc::Parms+0] = TypeInt::INT;
++  fields[TypeFunc::Parms+1] = TypePtr::NOTNULL;
++  fields[TypeFunc::Parms+2] = TypeInt::INT;
++  fields[TypeFunc::Parms+3] = TypeInt::INT;
++  
++  const TypeTuple *domain = TypeTuple::make(TypeFunc::Parms+4, fields);
++  
++  // create result type (range)
++  fields = TypeTuple::fields(1);
++  fields[TypeFunc::Parms+0] = TypeInt::INT;
++  const TypeTuple *range = TypeTuple::make(TypeFunc::Parms+1, fields);
++  const TypeFunc *tf = TypeFunc::make(domain, range);
++  
++  const TypePtr* no_memory_effects = NULL;
++  
++  Node* crc = argument(0);
++  Node* buf = argument(1);
++  Node* off = argument(2);
++  Node* len = argument(3);
++  Node* call = make_runtime_call(RC_LEAF, tf, funcAddr, funcName, no_memory_effects, crc, buf, off, len);
++  Node* value = _gvn.transform(new (C, 1) ProjNode(call, TypeFunc::Parms+0));
++  push(value);
++  return true;
++}
++
+ //---------------------------inline_native_getClass----------------------------
+ // Build special case code for calls to getClass on an object.
+ bool LibraryCallKit::inline_native_getClass() {
+diff --git a/src/share/vm/prims/nativeLookup.cpp b/src/share/vm/prims/nativeLookup.cpp
+--- a/src/share/vm/prims/nativeLookup.cpp
++++ b/src/share/vm/prims/nativeLookup.cpp
+@@ -105,6 +105,9 @@
+   void JNICALL JVM_RegisterUnsafeMethods(JNIEnv *env, jclass unsafecls);
+   void JNICALL JVM_RegisterMethodHandleMethods(JNIEnv *env, jclass unsafecls);
+   void JNICALL JVM_RegisterPerfMethods(JNIEnv *env, jclass perfclass);
++  void JNICALL JVM_RegistertaobaoCrc32Methods(JNIEnv *env, jclass taobaocrc32cls);
++  void JNICALL JVM_RegistertaobaoCrc32CMethods(JNIEnv *env, jclass taobaocrc32ccls);
++  DEBUG_ONLY(void JNICALL JVM_RegistertaobaoCrc32CJNIMethods(JNIEnv *env, jclass taobaocrc32cjnicls);)
+ }
+ 
+ static address lookup_special_native(char* jni_name) {
+@@ -129,7 +132,17 @@
+   if (strstr(jni_name, "Java_sun_misc_Perf_registerNatives") != NULL) {
+     return CAST_FROM_FN_PTR(address, JVM_RegisterPerfMethods);
+   }
+-
++  if (strstr(jni_name, "Java_com_taobao_java_util_crc_TCrc32_registerNatives") != NULL) {
++    return CAST_FROM_FN_PTR(address, JVM_RegistertaobaoCrc32Methods);
++  }
++  if (strstr(jni_name, "Java_com_taobao_java_util_crc_TCrc32C_registerNatives") != NULL) {
++    return CAST_FROM_FN_PTR(address, JVM_RegistertaobaoCrc32CMethods);
++  }
++  DEBUG_ONLY(
++  if (strstr(jni_name, "Java_com_taobao_java_util_crc_taobaoCrc32CJNI_registerNatives") != NULL) {
++    return CAST_FROM_FN_PTR(address, JVM_RegistertaobaoCrc32CJNIMethods);
++  }
++  )
+   return NULL;
+ }
+ 
+diff --git a/src/share/vm/runtime/sharedRuntime.hpp b/src/share/vm/runtime/sharedRuntime.hpp
+--- a/src/share/vm/runtime/sharedRuntime.hpp
++++ b/src/share/vm/runtime/sharedRuntime.hpp
+@@ -675,4 +675,7 @@
+ 
+ };
+ 
++int taobaoCRC32(int crc, typeArrayOop buf, int off, int len) ;
++int taobaoCRC32C(int crc, typeArrayOop buf, int off, int len) ;
++
+ #endif // SHARE_VM_RUNTIME_SHAREDRUNTIME_HPP

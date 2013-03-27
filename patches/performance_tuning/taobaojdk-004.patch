@@ -1,0 +1,105 @@
+  // remove possible return value from FPU register stack
+diff -r 883328bfc472 src/cpu/x86/vm/sharedRuntime_x86_64.cpp
+--- a/src/cpu/x86/vm/sharedRuntime_x86_64.cpp	Thu Nov 17 10:45:53 2011 -0800
++++ b/src/cpu/x86/vm/sharedRuntime_x86_64.cpp	Mon Nov 21 00:14:06 2011 +0800
+@@ -1303,18 +1303,13 @@
+   const Register ic_reg = rax;
+   const Register receiver = j_rarg0;
+ 
+-  Label ok;
+   Label exception_pending;
+ 
+   assert_different_registers(ic_reg, receiver, rscratch1);
+   __ verify_oop(receiver);
+   __ load_klass(rscratch1, receiver);
+   __ cmpq(ic_reg, rscratch1);
+-  __ jcc(Assembler::equal, ok);
+-
+-  __ jump(RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
+-
+-  __ bind(ok);
++  __ jump_cc(Assembler::notEqual, RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
+ 
+   // Verified entry point must be aligned
+   __ align(8);
+@@ -1656,36 +1651,15 @@
+ 
+ 
+   // check for safepoint operation in progress and/or pending suspend requests
+-  {
+-    Label Continue;
++  Label change_thread_state;
++  Label check_native_trans;
++  __ cmp32(ExternalAddress((address)SafepointSynchronize::address_of_state()),
++           SafepointSynchronize::_not_synchronized);
++  __ jcc(Assembler::notEqual, check_native_trans);
++  __ cmpl(Address(r15_thread, JavaThread::suspend_flags_offset()), 0);
++  __ jcc(Assembler::notEqual, check_native_trans);
+ 
+-    __ cmp32(ExternalAddress((address)SafepointSynchronize::address_of_state()),
+-             SafepointSynchronize::_not_synchronized);
+-
+-    Label L;
+-    __ jcc(Assembler::notEqual, L);
+-    __ cmpl(Address(r15_thread, JavaThread::suspend_flags_offset()), 0);
+-    __ jcc(Assembler::equal, Continue);
+-    __ bind(L);
+-
+-    // Don't use call_VM as it will see a possible pending exception and forward it
+-    // and never return here preventing us from clearing _last_native_pc down below.
+-    // Also can't use call_VM_leaf either as it will check to see if rsi & rdi are
+-    // preserved and correspond to the bcp/locals pointers. So we do a runtime call
+-    // by hand.
+-    //
+-    save_native_result(masm, ret_type, stack_slots);
+-    __ mov(c_rarg0, r15_thread);
+-    __ mov(r12, rsp); // remember sp
+-    __ subptr(rsp, frame::arg_reg_save_area_bytes); // windows
+-    __ andptr(rsp, -16); // align stack as required by ABI
+-    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans)));
+-    __ mov(rsp, r12); // restore sp
+-    __ reinit_heapbase();
+-    // Restore any method result value
+-    restore_native_result(masm, ret_type, stack_slots);
+-    __ bind(Continue);
+-  }
++  __ bind(change_thread_state);
+ 
+   // change thread state
+   __ movl(Address(r15_thread, JavaThread::thread_state_offset()), _thread_in_Java);
+@@ -1785,12 +1759,32 @@
+ 
+   // Unexpected paths are out of line and go here
+ 
+-  // forward the exception
++  // Forward the exception
+   __ bind(exception_pending);
+-
+-  // and forward the exception
+   __ jump(RuntimeAddress(StubRoutines::forward_exception_entry()));
+ 
++  // SLOW PATH Check special condition for native transition
++  {
++    __ bind(check_native_trans);
++
++    // Don't use call_VM as it will see a possible pending exception and forward it
++    // and never return here preventing us from clearing _last_native_pc down below.
++    // Also can't use call_VM_leaf either as it will check to see if rsi & rdi are
++    // preserved and correspond to the bcp/locals pointers. So we do a runtime call
++    // by hand.
++    //
++    save_native_result(masm, ret_type, stack_slots);
++    __ mov(c_rarg0, r15_thread);
++    __ mov(r12, rsp); // remember sp
++    __ subptr(rsp, frame::arg_reg_save_area_bytes); // windows
++    __ andptr(rsp, -16); // align stack as required by ABI
++    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans)));
++    __ mov(rsp, r12); // restore sp
++    __ reinit_heapbase();
++    // Restore any method result value
++    restore_native_result(masm, ret_type, stack_slots);
++    __ jmp(change_thread_state);
++  }
+ 
+   // Slow path locking & unlocking
+   if (method->is_synchronized()) {

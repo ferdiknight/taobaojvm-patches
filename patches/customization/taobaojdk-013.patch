@@ -1,0 +1,11 @@
+--- a/src/share/vm/gc_implementation/concurrentMarkSweep/compactibleFreeListSpace.cpp	Mon Dec 19 20:33:20 2011 +0800
++++ b/src/share/vm/gc_implementation/concurrentMarkSweep/compactibleFreeListSpace.cpp	Mon Dec 19 20:37:40 2011 +0800
+@@ -1143,7 +1143,7 @@
+	   return (dead_map->sizeInBits() == 0) // bit_map has been allocated
+			  || !dead_map->par_isMarked((HeapWord*) p);
+	 } else {
+-        return false; // We can't say for sure if it's live, so we say that it's dead.
++        return true; // We can't say for sure if it's live, so we say that it's alive, for the sake of heap dump.
+	 }
+  }
+}

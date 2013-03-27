@@ -1,0 +1,59 @@
+diff -r fac0368e3993 src/os_cpu/linux_x86/vm/os_linux_x86.cpp
+--- a/src/os_cpu/linux_x86/vm/os_linux_x86.cpp	Mon Dec 19 22:02:36 2011 +0800
++++ b/src/os_cpu/linux_x86/vm/os_linux_x86.cpp	Mon Dec 19 22:04:13 2011 +0800
+@@ -747,6 +747,35 @@
+ /////////////////////////////////////////////////////////////////////////////
+ // helper functions for fatal error handler
+ 
++static address same_page(address x, address y) {
++  int page_bits = -os::vm_page_size();
++  if ((intptr_t(x) & page_bits) == (intptr_t(y) & page_bits))
++    return x;
++  else if (x > y)
++    return (address)(intptr_t(y) | ~page_bits) + 1;
++  else
++    return (address)(intptr_t(y) & page_bits);
++}
++
++// decode some bytes around the PC
++static void print_instructions(address addr, int margin, outputStream* st) {
++  address begin = same_page(addr - margin, addr);
++  address end   = same_page(addr + margin, addr);
++  Dl_info dlinfo;
++  memset(&dlinfo, 0, sizeof(dlinfo));
++  if (dladdr(addr, &dlinfo)) {
++    address       lowest = (address) dlinfo.dli_sname;
++    if (!lowest)  lowest = (address) dlinfo.dli_fbase;
++    if (begin < lowest)  begin = lowest;
++    Dl_info dlinfo2;
++    if (dladdr(end, &dlinfo2) && dlinfo2.dli_saddr != dlinfo.dli_saddr
++        && end > dlinfo2.dli_saddr && dlinfo2.dli_saddr > begin) {
++      end = (address) dlinfo2.dli_saddr;
++    }
++  }
++  Disassembler::decode(begin, end, st);
++}
++
+ void os::print_context(outputStream *st, void *context) {
+   if (context == NULL) return;
+ 
+@@ -808,6 +837,9 @@
+   address pc = os::Linux::ucontext_get_pc(uc);
+   st->print_cr("Instructions: (pc=" PTR_FORMAT ")", pc);
+   print_hex_dump(st, pc - 32, pc + 32, sizeof(char));
++  st->cr();
++
++  print_instructions(pc, 32, st);
+ }
+ 
+ void os::print_register_info(outputStream *st, void *context) {
+diff -r fac0368e3993 src/share/vm/utilities/ostream.cpp
+--- a/src/share/vm/utilities/ostream.cpp	Mon Dec 19 22:02:36 2011 +0800
++++ b/src/share/vm/utilities/ostream.cpp	Mon Dec 19 22:04:13 2011 +0800
+@@ -769,6 +769,7 @@
+ }
+ 
+ void staticBufferStream::write(const char* c, size_t len) {
++  update_position(c, len);
+   _outer_stream->print_raw(c, (int)len);
+ }

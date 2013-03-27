@@ -1,0 +1,133 @@
+diff -r 7d5bd0ab8d78 -r 7958af516dab src/main/java/com/taobao/java/util/vm/GCUtils.java
+--- /dev/null   Thu Jan 01 00:00:00 1970 +0000
++++ b/src/main/java/com/taobao/java/util/vm/GCUtils.java        Wed Dec 21 14:50:08 2011 +0800
+@@ -0,0 +1,69 @@
++/*
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ */
++
++package com.taobao.java.util.vm;
++
++public class GCUtils {
++    private static final String DisableExplicitGC = "DisableExplicitGC";
++    private static final String ExplicitGCInvokesConcurrent = "ExplicitGCInvokesConcurrent";
++    private static final boolean isCMS =
++        Boolean.parseBoolean(HotSpotUtils.getVMOption("UseConcMarkSweepGC"));
++
++    private static boolean getDisableExplicitGC() {
++        return Boolean.parseBoolean(HotSpotUtils.getVMOption(DisableExplicitGC));
++    }
++
++    private static void setDisableExplicitGC(boolean value) {
++        HotSpotUtils.setVMOption(DisableExplicitGC, Boolean.toString(value));
++    }
++
++    private static boolean getExplicitGCInvokesConcurrent() {
++        return Boolean.parseBoolean(HotSpotUtils.getVMOption(ExplicitGCInvokesConcurrent));
++    }
++
++    private static void setExplicitGCInvokesConcurrent(boolean value) {
++        HotSpotUtils.setVMOption(ExplicitGCInvokesConcurrent, Boolean.toString(value));
++    }
++
++    public static void forceGC() {
++        if (getDisableExplicitGC()) {
++            setDisableExplicitGC(false);
++            System.gc();
++            setDisableExplicitGC(true);
++        } else {
++            System.gc();
++        }
++    }
++
++    public static void forceCompactionGC() {
++        if (isCMS && getExplicitGCInvokesConcurrent()) {
++            setExplicitGCInvokesConcurrent(false);
++            forceGC();
++            setExplicitGCInvokesConcurrent(true);
++        } else {
++            forceGC();
++        }
++    }
++}
++
+diff -r 7d5bd0ab8d78 -r 7958af516dab src/main/java/com/taobao/java/util/vm/HotSpotUtils.java
+--- /dev/null   Thu Jan 01 00:00:00 1970 +0000
++++ b/src/main/java/com/taobao/java/util/vm/HotSpotUtils.java   Wed Dec 21 14:50:08 2011 +0800
+@@ -0,0 +1,56 @@
++/*
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ *
++ */
++
++package com.taobao.java.util.vm;
++
++import java.lang.management.ManagementFactory;
++import javax.management.MBeanServer;
++import com.sun.management.HotSpotDiagnosticMXBean;
++
++public class HotSpotUtils {
++    public static String getVMOption(String name) {
++        return SingletonHolder.HOTSPOT_BEAN.getVMOption(name).getValue(); // could throw exception
++    }
++
++    public static void setVMOption(String name, String value) {
++        SingletonHolder.HOTSPOT_BEAN.setVMOption(name, value);
++    }
++
++    private static class SingletonHolder {
++        static final HotSpotDiagnosticMXBean HOTSPOT_BEAN = populateHotSpotBean();
++        private static final String HOTSPOT_BEAN_NAME = "com.sun.management:type=HotSpotDiagnostic";
++
++        private static final HotSpotDiagnosticMXBean populateHotSpotBean() {
++            try {
++                MBeanServer server = ManagementFactory.getPlatformMBeanServer();
++                HotSpotDiagnosticMXBean bean = ManagementFactory.newPlatformMXBeanProxy(
++                    server, HOTSPOT_BEAN_NAME, HotSpotDiagnosticMXBean.class);
++                return bean;
++            } catch (java.io.IOException e) {
++                throw new InternalError("should run on a HotSpot VM");
++            }
++        }
++    }
++}
++

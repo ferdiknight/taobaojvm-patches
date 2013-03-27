@@ -1,0 +1,21 @@
+diff -r 899e8d8df579 src/share/vm/runtime/globals.hpp
+--- a/src/share/vm/runtime/globals.hpp	Mon Dec 05 12:50:00 2011 -0500
++++ b/src/share/vm/runtime/globals.hpp	Fri Dec 16 11:33:09 2011 +0800
+@@ -1387,7 +1387,7 @@
+   product(bool, UseConcMarkSweepGC, false,                                  \
+           "Use Concurrent Mark-Sweep GC in the old generation")             \
+                                                                             \
+-  product(bool, ExplicitGCInvokesConcurrent, false,                         \
++  manageable(bool, ExplicitGCInvokesConcurrent, false,                      \
+           "A System.gc() request invokes a concurrent collection;"          \
+           " (effective only when UseConcMarkSweepGC)")                      \
+                                                                             \
+@@ -2140,7 +2140,7 @@
+   diagnostic(bool, VerifyObjectStartArray, true,                            \
+           "Verify GC object start array if verify before/after")            \
+                                                                             \
+-  product(bool, DisableExplicitGC, false,                                   \
++  manageable(bool, DisableExplicitGC, false,                                \
+           "Tells whether calling System.gc() does a full GC")               \
+                                                                             \
+   notproduct(bool, CheckMemoryInitialization, false,                        \

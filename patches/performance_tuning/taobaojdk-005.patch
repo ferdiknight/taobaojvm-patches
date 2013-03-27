@@ -1,0 +1,410 @@
+diff -r 29969ab9b2ea src/cpu/x86/vm/c1_LIRAssembler_x86.cpp
+--- a/src/cpu/x86/vm/c1_LIRAssembler_x86.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/cpu/x86/vm/c1_LIRAssembler_x86.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -499,12 +499,12 @@
+     __ bind(*stub->continuation());
+   }
+ 
+-  if (compilation()->env()->dtrace_method_probes()) {
+-    __ get_thread(rax);
+-    __ movptr(Address(rsp, 0), rax);
+-    __ movoop(Address(rsp, sizeof(void*)), method()->constant_encoding());
+-    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit)));
+-  }
++//  if (compilation()->env()->dtrace_method_probes()) {
++//    __ get_thread(rax);
++//    __ movptr(Address(rsp, 0), rax);
++//    __ movoop(Address(rsp, sizeof(void*)), method()->constant_encoding());
++//    __ call(RuntimeAddress(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit)));
++//  }
+ 
+   if (method()->is_synchronized() || compilation()->env()->dtrace_method_probes()) {
+     __ mov(rax, rsi);  // Restore the exception
+diff -r 29969ab9b2ea src/cpu/x86/vm/c1_MacroAssembler_x86.cpp
+--- a/src/cpu/x86/vm/c1_MacroAssembler_x86.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/cpu/x86/vm/c1_MacroAssembler_x86.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -284,10 +284,10 @@
+     }
+   }
+ 
+-  if (CURRENT_ENV->dtrace_alloc_probes()) {
+-    assert(obj == rax, "must be");
+-    call(RuntimeAddress(Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)));
+-  }
++//  if (CURRENT_ENV->dtrace_alloc_probes()) {
++//    assert(obj == rax, "must be");
++//    call(RuntimeAddress(Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)));
++//  }
+ 
+   verify_oop(obj);
+ }
+@@ -317,10 +317,10 @@
+   const Register len_zero = len;
+   initialize_body(obj, arr_size, header_size * BytesPerWord, len_zero);
+ 
+-  if (CURRENT_ENV->dtrace_alloc_probes()) {
+-    assert(obj == rax, "must be");
+-    call(RuntimeAddress(Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)));
+-  }
++//  if (CURRENT_ENV->dtrace_alloc_probes()) {
++//    assert(obj == rax, "must be");
++//    call(RuntimeAddress(Runtime1::entry_for(Runtime1::dtrace_object_alloc_id)));
++//  }
+ 
+   verify_oop(obj);
+ }
+diff -r 29969ab9b2ea src/cpu/x86/vm/interp_masm_x86_64.cpp
+--- a/src/cpu/x86/vm/interp_masm_x86_64.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/cpu/x86/vm/interp_masm_x86_64.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -1446,12 +1446,12 @@
+     bind(L);
+   }
+ 
+-  {
+-    SkipIfEqual skip(this, &DTraceMethodProbes, false);
+-    get_method(c_rarg1);
+-    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry),
+-                 r15_thread, c_rarg1);
+-  }
++//  {
++//    SkipIfEqual skip(this, &DTraceMethodProbes, false);
++//    get_method(c_rarg1);
++//    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry),
++//                 r15_thread, c_rarg1);
++//  }
+ 
+   // RedefineClasses() tracing support for obsolete method entry
+   if (RC_TRACE_IN_RANGE(0x00001000, 0x00002000)) {
+@@ -1487,14 +1487,14 @@
+     NOT_CC_INTERP(pop(state));
+   }
+ 
+-  {
+-    SkipIfEqual skip(this, &DTraceMethodProbes, false);
+-    NOT_CC_INTERP(push(state));
+-    get_method(c_rarg1);
+-    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit),
+-                 r15_thread, c_rarg1);
+-    NOT_CC_INTERP(pop(state));
+-  }
++//  {
++//    SkipIfEqual skip(this, &DTraceMethodProbes, false);
++//    NOT_CC_INTERP(push(state));
++//    get_method(c_rarg1);
++//    call_VM_leaf(CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit),
++//                 r15_thread, c_rarg1);
++//    NOT_CC_INTERP(pop(state));
++//  }
+ }
+ 
+ // Jump if ((*counter_addr += increment) & mask) satisfies the condition.
+diff -r 29969ab9b2ea src/cpu/x86/vm/sharedRuntime_x86_64.cpp
+--- a/src/cpu/x86/vm/sharedRuntime_x86_64.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/cpu/x86/vm/sharedRuntime_x86_64.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -1489,16 +1489,16 @@
+   // We have all of the arguments setup at this point. We must not touch any register
+   // argument registers at this point (what if we save/restore them there are no oop?
+ 
+-  {
+-    SkipIfEqual skip(masm, &DTraceMethodProbes, false);
+-    // protect the args we've loaded
+-    save_args(masm, total_c_args, c_arg, out_regs);
+-    __ movoop(c_rarg1, JNIHandles::make_local(method()));
+-    __ call_VM_leaf(
+-      CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry),
+-      r15_thread, c_rarg1);
+-    restore_args(masm, total_c_args, c_arg, out_regs);
+-  }
++//  {
++//    SkipIfEqual skip(masm, &DTraceMethodProbes, false);
++//    // protect the args we've loaded
++//    save_args(masm, total_c_args, c_arg, out_regs);
++//    __ movoop(c_rarg1, JNIHandles::make_local(method()));
++//    __ call_VM_leaf(
++//      CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry),
++//      r15_thread, c_rarg1);
++//    restore_args(masm, total_c_args, c_arg, out_regs);
++//  }
+ 
+   // RedefineClasses() tracing support for obsolete method entry
+   if (RC_TRACE_IN_RANGE(0x00001000, 0x00002000)) {
+@@ -1718,15 +1718,15 @@
+     __ bind(done);
+ 
+   }
+-  {
+-    SkipIfEqual skip(masm, &DTraceMethodProbes, false);
+-    save_native_result(masm, ret_type, stack_slots);
+-    __ movoop(c_rarg1, JNIHandles::make_local(method()));
+-    __ call_VM_leaf(
+-         CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit),
+-         r15_thread, c_rarg1);
+-    restore_native_result(masm, ret_type, stack_slots);
+-  }
++//  {
++//    SkipIfEqual skip(masm, &DTraceMethodProbes, false);
++//    save_native_result(masm, ret_type, stack_slots);
++//    __ movoop(c_rarg1, JNIHandles::make_local(method()));
++//    __ call_VM_leaf(
++//         CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit),
++//         r15_thread, c_rarg1);
++//    restore_native_result(masm, ret_type, stack_slots);
++//  }
+ 
+   __ reset_last_Java_frame(false, true);
+ 
+diff -r 29969ab9b2ea src/cpu/x86/vm/templateTable_x86_64.cpp
+--- a/src/cpu/x86/vm/templateTable_x86_64.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/cpu/x86/vm/templateTable_x86_64.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -3291,15 +3291,15 @@
+     __ store_klass_gap(rax, rcx);  // zero klass gap for compressed oops
+     __ store_klass(rax, rsi);      // store klass last
+ 
+-    {
+-      SkipIfEqual skip(_masm, &DTraceAllocProbes, false);
+-      // Trigger dtrace event for fastpath
+-      __ push(atos); // save the return value
+-      __ call_VM_leaf(
+-           CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_object_alloc), rax);
+-      __ pop(atos); // restore the return value
+-
+-    }
++//    {
++//      SkipIfEqual skip(_masm, &DTraceAllocProbes, false);
++//      // Trigger dtrace event for fastpath
++//      __ push(atos); // save the return value
++//      __ call_VM_leaf(
++//           CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_object_alloc), rax);
++//      __ pop(atos); // restore the return value
++//
++//    }
+     __ jmp(done);
+   }
+ 
+diff -r 29969ab9b2ea src/share/vm/c1/c1_LIRGenerator.cpp
+--- a/src/share/vm/c1/c1_LIRGenerator.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/c1/c1_LIRGenerator.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -1080,17 +1080,17 @@
+ 
+ 
+ void LIRGenerator::do_Return(Return* x) {
+-  if (compilation()->env()->dtrace_method_probes()) {
+-    BasicTypeList signature;
+-    signature.append(LP64_ONLY(T_LONG) NOT_LP64(T_INT));    // thread
+-    signature.append(T_OBJECT); // methodOop
+-    LIR_OprList* args = new LIR_OprList();
+-    args->append(getThreadPointer());
+-    LIR_Opr meth = new_register(T_OBJECT);
+-    __ oop2reg(method()->constant_encoding(), meth);
+-    args->append(meth);
+-    call_runtime(&signature, args, CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit), voidType, NULL);
+-  }
++//  if (compilation()->env()->dtrace_method_probes()) {
++//    BasicTypeList signature;
++//    signature.append(LP64_ONLY(T_LONG) NOT_LP64(T_INT));    // thread
++//    signature.append(T_OBJECT); // methodOop
++//    LIR_OprList* args = new LIR_OprList();
++//    args->append(getThreadPointer());
++//    LIR_Opr meth = new_register(T_OBJECT);
++//    __ oop2reg(method()->constant_encoding(), meth);
++//    args->append(meth);
++//    call_runtime(&signature, args, CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_exit), voidType, NULL);
++//  }
+ 
+   if (x->type()->is_void()) {
+     __ return_op(LIR_OprFact::illegalOpr);
+@@ -2283,17 +2283,17 @@
+     java_index += type2size[t];
+   }
+ 
+-  if (compilation()->env()->dtrace_method_probes()) {
+-    BasicTypeList signature;
+-    signature.append(LP64_ONLY(T_LONG) NOT_LP64(T_INT));    // thread
+-    signature.append(T_OBJECT); // methodOop
+-    LIR_OprList* args = new LIR_OprList();
+-    args->append(getThreadPointer());
+-    LIR_Opr meth = new_register(T_OBJECT);
+-    __ oop2reg(method()->constant_encoding(), meth);
+-    args->append(meth);
+-    call_runtime(&signature, args, CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry), voidType, NULL);
+-  }
++//  if (compilation()->env()->dtrace_method_probes()) {
++//    BasicTypeList signature;
++//    signature.append(LP64_ONLY(T_LONG) NOT_LP64(T_INT));    // thread
++//    signature.append(T_OBJECT); // methodOop
++//    LIR_OprList* args = new LIR_OprList();
++//    args->append(getThreadPointer());
++//    LIR_Opr meth = new_register(T_OBJECT);
++//    __ oop2reg(method()->constant_encoding(), meth);
++//    args->append(meth);
++//    call_runtime(&signature, args, CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_method_entry), voidType, NULL);
++//  }
+ 
+   if (method()->is_synchronized()) {
+     LIR_Opr obj;
+diff -r 29969ab9b2ea src/share/vm/ci/ciEnv.cpp
+--- a/src/share/vm/ci/ciEnv.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/ci/ciEnv.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -912,13 +912,13 @@
+       record_failure("Jvmti state change invalidated dependencies");
+     }
+ 
+-    // Change in DTrace flags may invalidate compilation.
+-    if (!failing() &&
+-        ( (!dtrace_extended_probes() && ExtendedDTraceProbes) ||
+-          (!dtrace_method_probes() && DTraceMethodProbes) ||
+-          (!dtrace_alloc_probes() && DTraceAllocProbes) )) {
+-      record_failure("DTrace flags change invalidated dependencies");
+-    }
++//    // Change in DTrace flags may invalidate compilation.
++//    if (!failing() &&
++//        ( (!dtrace_extended_probes() && ExtendedDTraceProbes) ||
++//          (!dtrace_method_probes() && DTraceMethodProbes) ||
++//          (!dtrace_alloc_probes() && DTraceAllocProbes) )) {
++//      record_failure("DTrace flags change invalidated dependencies");
++//    }
+ 
+     if (!failing()) {
+       if (log() != NULL) {
+diff -r 29969ab9b2ea src/share/vm/gc_interface/collectedHeap.inline.hpp
+--- a/src/share/vm/gc_interface/collectedHeap.inline.hpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/gc_interface/collectedHeap.inline.hpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -89,12 +89,12 @@
+   // support for JVMTI VMObjectAlloc event (no-op if not enabled)
+   JvmtiExport::vm_object_alloc_event_collector(obj);
+ 
+-  if (DTraceAllocProbes) {
+-    // support for Dtrace object alloc event (no-op most of the time)
+-    if (klass() != NULL && klass()->klass_part()->name() != NULL) {
+-      SharedRuntime::dtrace_object_alloc(obj);
+-    }
+-  }
++//  if (DTraceAllocProbes) {
++//    // support for Dtrace object alloc event (no-op most of the time)
++//    if (klass() != NULL && klass()->klass_part()->name() != NULL) {
++//      SharedRuntime::dtrace_object_alloc(obj);
++//    }
++//  }
+ }
+ 
+ void CollectedHeap::post_allocation_setup_obj(KlassHandle klass,
+diff -r 29969ab9b2ea src/share/vm/opto/doCall.cpp
+--- a/src/share/vm/opto/doCall.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/opto/doCall.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -63,10 +63,10 @@
+                                        float prof_factor) {
+   CallGenerator* cg;
+ 
+-  // Dtrace currently doesn't work unless all calls are vanilla
+-  if (env()->dtrace_method_probes()) {
+-    allow_inline = false;
+-  }
++//  // Dtrace currently doesn't work unless all calls are vanilla
++//  if (env()->dtrace_method_probes()) {
++//    allow_inline = false;
++//  }
+ 
+   // Note: When we get profiling during stage-1 compiles, we want to pull
+   // from more specific profile data which pertains to this inlining.
+diff -r 29969ab9b2ea src/share/vm/opto/macro.cpp
+--- a/src/share/vm/opto/macro.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/opto/macro.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -1291,31 +1291,31 @@
+                                         fast_oop_ctrl, fast_oop_rawmem, fast_oop,
+                                         klass_node, length, size_in_bytes);
+ 
+-    if (C->env()->dtrace_extended_probes()) {
+-      // Slow-path call
+-      int size = TypeFunc::Parms + 2;
+-      CallLeafNode *call = new (C, size) CallLeafNode(OptoRuntime::dtrace_object_alloc_Type(),
+-                                                      CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_object_alloc_base),
+-                                                      "dtrace_object_alloc",
+-                                                      TypeRawPtr::BOTTOM);
+-
+-      // Get base of thread-local storage area
+-      Node* thread = new (C, 1) ThreadLocalNode();
+-      transform_later(thread);
+-
+-      call->init_req(TypeFunc::Parms+0, thread);
+-      call->init_req(TypeFunc::Parms+1, fast_oop);
+-      call->init_req(TypeFunc::Control, fast_oop_ctrl);
+-      call->init_req(TypeFunc::I_O    , top()); // does no i/o
+-      call->init_req(TypeFunc::Memory , fast_oop_rawmem);
+-      call->init_req(TypeFunc::ReturnAdr, alloc->in(TypeFunc::ReturnAdr));
+-      call->init_req(TypeFunc::FramePtr, alloc->in(TypeFunc::FramePtr));
+-      transform_later(call);
+-      fast_oop_ctrl = new (C, 1) ProjNode(call,TypeFunc::Control);
+-      transform_later(fast_oop_ctrl);
+-      fast_oop_rawmem = new (C, 1) ProjNode(call,TypeFunc::Memory);
+-      transform_later(fast_oop_rawmem);
+-    }
++//    if (C->env()->dtrace_extended_probes()) {
++//      // Slow-path call
++//      int size = TypeFunc::Parms + 2;
++//      CallLeafNode *call = new (C, size) CallLeafNode(OptoRuntime::dtrace_object_alloc_Type(),
++//                                                      CAST_FROM_FN_PTR(address, SharedRuntime::dtrace_object_alloc_base),
++//                                                      "dtrace_object_alloc",
++//                                                      TypeRawPtr::BOTTOM);
++//
++//      // Get base of thread-local storage area
++//      Node* thread = new (C, 1) ThreadLocalNode();
++//      transform_later(thread);
++//
++//      call->init_req(TypeFunc::Parms+0, thread);
++//      call->init_req(TypeFunc::Parms+1, fast_oop);
++//      call->init_req(TypeFunc::Control, fast_oop_ctrl);
++//      call->init_req(TypeFunc::I_O    , top()); // does no i/o
++//      call->init_req(TypeFunc::Memory , fast_oop_rawmem);
++//      call->init_req(TypeFunc::ReturnAdr, alloc->in(TypeFunc::ReturnAdr));
++//      call->init_req(TypeFunc::FramePtr, alloc->in(TypeFunc::FramePtr));
++//      transform_later(call);
++//      fast_oop_ctrl = new (C, 1) ProjNode(call,TypeFunc::Control);
++//      transform_later(fast_oop_ctrl);
++//      fast_oop_rawmem = new (C, 1) ProjNode(call,TypeFunc::Memory);
++//      transform_later(fast_oop_rawmem);
++//    }
+ 
+     // Plug in the successful fast-path into the result merge point
+     result_region    ->init_req(fast_result_path, fast_oop_ctrl);
+diff -r 29969ab9b2ea src/share/vm/opto/parse1.cpp
+--- a/src/share/vm/opto/parse1.cpp	Mon Dec 19 17:35:58 2011 +0800
++++ b/src/share/vm/opto/parse1.cpp	Mon Dec 19 17:37:11 2011 +0800
+@@ -949,9 +949,9 @@
+         // Unlock!
+         kit.shared_unlock(_synch_lock->box_node(), _synch_lock->obj_node());
+       }
+-      if (C->env()->dtrace_method_probes()) {
+-        kit.make_dtrace_method_exit(method());
+-      }
++//      if (C->env()->dtrace_method_probes()) {
++//        kit.make_dtrace_method_exit(method());
++//      }
+       // Done with exception-path processing.
+       ex_map = kit.make_exception_state(ex_oop);
+       assert(ex_jvms->same_calls_as(ex_map->jvms()), "sanity");
+@@ -1048,9 +1048,9 @@
+ 
+   NOT_PRODUCT( count_compiled_calls(true/*at_method_entry*/, false/*is_inline*/); )
+ 
+-  if (C->env()->dtrace_method_probes()) {
+-    make_dtrace_method_entry(method());
+-  }
++//  if (C->env()->dtrace_method_probes()) {
++//    make_dtrace_method_entry(method());
++//  }
+ 
+   // If the method is synchronized, we need to construct a lock node, attach
+   // it to the Start node, and pin it there.
+@@ -1938,9 +1938,9 @@
+   if (method()->is_synchronized() && GenerateSynchronizationCode) {
+     shared_unlock(_synch_lock->box_node(), _synch_lock->obj_node());
+   }
+-  if (C->env()->dtrace_method_probes()) {
+-    make_dtrace_method_exit(method());
+-  }
++//  if (C->env()->dtrace_method_probes()) {
++//    make_dtrace_method_exit(method());
++//  }
+   SafePointNode* exit_return = _exits.map();
+   exit_return->in( TypeFunc::Control  )->add_req( control() );
+   exit_return->in( TypeFunc::I_O      )->add_req( i_o    () );

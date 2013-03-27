@@ -1,0 +1,37 @@
+diff -r 454e461c8767 src/share/vm/runtime/arguments.cpp
+--- a/src/share/vm/runtime/arguments.cpp	Mon Dec 19 20:19:25 2011 +0800
++++ b/src/share/vm/runtime/arguments.cpp	Mon Dec 19 20:29:20 2011 +0800
+@@ -2017,6 +2017,21 @@
+     return result;
+   }
+ 
++  if (UseTaobaoPatchJAR) {
++    // Insert taobao-patch.jar between user-specified bootclasspath
++    // prefix and the default bootclasspath.  os::set_boot_path()
++    // uses meta_index_dir as the default bootclasspath directory.
++    const char* altclasses_jar = "taobao-patch.jar";
++    size_t altclasses_path_len = strlen(get_meta_index_dir()) + 1 +
++                                 strlen(altclasses_jar);
++    char* altclasses_path = NEW_C_HEAP_ARRAY(char, altclasses_path_len);
++    strcpy(altclasses_path, get_meta_index_dir());
++    strcat(altclasses_path, altclasses_jar);
++    scp.add_suffix_to_prefix(altclasses_path);
++    scp_assembly_required = true;
++    FREE_C_HEAP_ARRAY(char, altclasses_path);
++  }
++
+   if (AggressiveOpts) {
+     // Insert alt-rt.jar between user-specified bootclasspath
+     // prefix and the default bootclasspath.  os::set_boot_path()
+diff -r 454e461c8767 src/share/vm/runtime/globals_ext.hpp
+--- a/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 20:19:25 2011 +0800
++++ b/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 20:29:20 2011 +0800
+@@ -32,7 +32,9 @@
+           "array allocation with size larger than this (bytes) will be "    \
+           "given a warning")                                                \
+   manageable(bool, PrintGCReason, false,                                    \
+-          "Print the reason of triggering a garbage collection cycle")
++          "Print the reason of triggering a garbage collection cycle")      \
++  product(bool, UseTaobaoPatchJAR, true,                                    \
++          "Insert Taobao-specific patch JAR into bootclasspath")
+ // add new Taobao-specific VM flags here

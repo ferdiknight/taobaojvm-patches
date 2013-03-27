@@ -1,0 +1,126 @@
+diff -r b6a9d1c20ab2 src/share/vm/gc_interface/collectedHeap.cpp
+--- a/src/share/vm/gc_interface/collectedHeap.cpp	Mon Dec 19 14:54:11 2011 +0800
++++ b/src/share/vm/gc_interface/collectedHeap.cpp	Mon Dec 19 15:31:11 2011 +0800
+@@ -47,6 +47,8 @@
+ 
+ size_t CollectedHeap::_filler_array_max_size = 0;
+ 
++int CollectedHeap::_array_allocation_warning_size = 0;
++
+ // Memory state functions.
+ 
+ 
+@@ -57,6 +59,8 @@
+   const size_t elements_per_word = HeapWordSize / sizeof(jint);
+   _filler_array_max_size = align_object_size(filler_array_hdr_size() +
+                                              max_len * elements_per_word);
++  // ArrayAllocationWarningSize is in bytes, convert it to number of words here
++  _array_allocation_warning_size = ArrayAllocationWarningSize / HeapWordSize;
+ 
+   _barrier_set = NULL;
+   _is_gc_active = false;
+diff -r b6a9d1c20ab2 src/share/vm/gc_interface/collectedHeap.hpp
+--- a/src/share/vm/gc_interface/collectedHeap.hpp	Mon Dec 19 14:54:11 2011 +0800
++++ b/src/share/vm/gc_interface/collectedHeap.hpp	Mon Dec 19 15:31:11 2011 +0800
+@@ -61,6 +61,11 @@
+ 
+   // Used for filler objects (static, but initialized in ctor).
+   static size_t _filler_array_max_size;
++  
++  // Used for printing warnings against large array allocations. Count size in words.
++  // (static, but initialized in ctor).
++  // would be better using size_t, but the value to compare with is of int type
++  static int _array_allocation_warning_size;
+ 
+   // Used in support of ReduceInitialCardMarks; only consulted if COMPILER2 is being used
+   bool _defer_initial_card_mark;
+@@ -320,6 +325,7 @@
+   inline static oop obj_allocate(KlassHandle klass, int size, TRAPS);
+   inline static oop array_allocate(KlassHandle klass, int size, int length, TRAPS);
+   inline static oop large_typearray_allocate(KlassHandle klass, int size, int length, TRAPS);
++  inline static void check_array_size(int size, int length, TRAPS);
+ 
+   // Special obj/array allocation facilities.
+   // Some heaps may want to manage "permanent" data uniquely. These default
+diff -r b6a9d1c20ab2 src/share/vm/gc_interface/collectedHeap.inline.hpp
+--- a/src/share/vm/gc_interface/collectedHeap.inline.hpp	Mon Dec 19 14:54:11 2011 +0800
++++ b/src/share/vm/gc_interface/collectedHeap.inline.hpp	Mon Dec 19 15:31:11 2011 +0800
+@@ -261,6 +261,31 @@
+   return (oop)obj;
+ }
+ 
++void CollectedHeap::check_array_size(int size,
++                                     int length,
++                                     TRAPS) {
++  if (size >= _array_allocation_warning_size) {
++    // TODO check if a ResourceMark is needed here,
++    //      because JavaThread::name() may need allocation
++    ResourceMark rm(THREAD);
++    
++    //give a warning
++    gclog_or_tty->print_cr("==WARNNING==  allocating large array--"\
++                           "thread_id[" INTPTR_FORMAT "]--"          \
++                           "thread_name[%s]--"                       \
++                           "array_size[" SIZE_FORMAT " bytes]--"     \
++                           "array_length[%d elememts]",
++                           THREAD, THREAD->name(), size * HeapWordSize, length);
++
++    //print stack info
++    THREAD->print_on(gclog_or_tty);
++    gclog_or_tty->cr();
++    if (THREAD->is_Java_thread()) {
++      ((JavaThread*) THREAD)->print_stack_on(gclog_or_tty);
++    }
++  }
++}
++
+ oop CollectedHeap::array_allocate(KlassHandle klass,
+                                   int size,
+                                   int length,
+@@ -268,6 +293,9 @@
+   debug_only(check_for_valid_allocation_state());
+   assert(!Universe::heap()->is_gc_active(), "Allocation during gc not allowed");
+   assert(size >= 0, "int won't convert to size_t");
++  
++  check_array_size(size, length, THREAD);
++  
+   HeapWord* obj = common_mem_allocate_init(size, false, CHECK_NULL);
+   post_allocation_setup_array(klass, obj, size, length);
+   NOT_PRODUCT(Universe::heap()->check_for_bad_heap_word_value(obj, size));
+@@ -281,6 +309,9 @@
+   debug_only(check_for_valid_allocation_state());
+   assert(!Universe::heap()->is_gc_active(), "Allocation during gc not allowed");
+   assert(size >= 0, "int won't convert to size_t");
++  
++  check_array_size(size, length, THREAD);
++  
+   HeapWord* obj = common_mem_allocate_init(size, true, CHECK_NULL);
+   post_allocation_setup_array(klass, obj, size, length);
+   NOT_PRODUCT(Universe::heap()->check_for_bad_heap_word_value(obj, size));
+diff -r b6a9d1c20ab2 src/share/vm/runtime/arguments.cpp
+--- a/src/share/vm/runtime/arguments.cpp	Mon Dec 19 14:54:11 2011 +0800
++++ b/src/share/vm/runtime/arguments.cpp	Mon Dec 19 15:31:11 2011 +0800
+@@ -1741,6 +1741,10 @@
+   // before returning an error.
+   // Note: Needs platform-dependent factoring.
+   bool status = true;
++  
++  if ((uintx) ArrayAllocationWarningSize >= (uintx) max_intx) {
++    FLAG_SET_CMDLINE(intx, ArrayAllocationWarningSize, max_intx);
++  }
+ 
+ #if ( (defined(COMPILER2) && defined(SPARC)))
+   // NOTE: The call to VM_Version_init depends on the fact that VM_Version_init
+diff -r b6a9d1c20ab2 src/share/vm/runtime/globals_ext.hpp
+--- a/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 14:54:11 2011 +0800
++++ b/src/share/vm/runtime/globals_ext.hpp	Mon Dec 19 15:31:11 2011 +0800
+@@ -28,6 +28,9 @@
+ // Taobao-specific globals.hpp extension
+ 
+ #define TAOBAO_FLAGS(develop, develop_pd, product, product_pd, diagnostic, experimental, notproduct, manageable, product_rw, lp64_product) \
++  product(intx, ArrayAllocationWarningSize, 512*M,                          \
++          "array allocation with size larger than this (bytes) will be "    \
++          "given a warning")
+ // add new Taobao-specific VM flags here
+ 
+ TAOBAO_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG
